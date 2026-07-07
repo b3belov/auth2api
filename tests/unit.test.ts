@@ -373,6 +373,38 @@ test("proxyWithRetry tags stats failure kind for upstream server errors", async 
   assert.equal(resp.locals.stats.failureKind, "server");
 });
 
+test("proxyWithRetry records classified account-scoped 403 once on final attempt", async () => {
+  const resp = makeMockResponse();
+  const account: any = { token: { email: "x@y.z" } };
+  const failures: Array<{ email: string; kind: string; detail?: string }> = [];
+  const manager: any = {
+    provider: "codex",
+    accountCount: 1,
+    getNextAccount: () => ({ account }),
+    recordAttempt: () => {},
+    recordFailure: (email: string, kind: string, detail?: string) => {
+      failures.push({ email, kind, detail });
+    },
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestProxy", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 1,
+    upstream: async () =>
+      new Response("requires chatgpt plus", { status: 403 }),
+    success: async () => {},
+    classifyAccountScopedError: () => "forbidden",
+  });
+
+  assert.equal(failures.length, 1);
+  assert.deepEqual(failures[0], {
+    email: "x@y.z",
+    kind: "forbidden",
+    detail: "requires chatgpt plus",
+  });
+});
+
 // ══════════════════════════════════════════════════
 // config.ts
 // ══════════════════════════════════════════════════

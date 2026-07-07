@@ -58,12 +58,23 @@ function codexAccountScopedError(
 ): "forbidden" | null {
   if (status !== 400 && status !== 403) return null;
   const text = body.toLowerCase();
+  const entitlementUpgradePhrases = [
+    "please upgrade",
+    "upgrade your plan",
+    "upgrade to plus",
+    "upgrade to pro",
+    "upgrade to chatgpt plus",
+    "upgrade to chatgpt pro",
+    "upgrade to a paid plan",
+    "plan upgrade required",
+    "subscription upgrade required",
+  ];
   if (
     text.includes("model not supported") ||
     text.includes("not available for this account") ||
     text.includes("requires chatgpt plus") ||
     text.includes("requires chatgpt pro") ||
-    text.includes("upgrade")
+    entitlementUpgradePhrases.some((phrase) => text.includes(phrase))
   ) {
     return "forbidden";
   }

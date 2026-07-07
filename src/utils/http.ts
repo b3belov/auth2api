@@ -128,7 +128,14 @@ export async function proxyWithRetry(
   options: ProxyOptions,
 ): Promise<void> {
   const { manager } = options;
-  const maxRetries = options.maxRetries ?? MAX_RETRIES;
+  const maxRetries =
+    options.maxRetries !== undefined && Number.isFinite(options.maxRetries)
+      ? options.maxRetries
+      : MAX_RETRIES;
+  const accountCount = Number.isFinite(manager.accountCount)
+    ? manager.accountCount
+    : 0;
+  const retryLimit = Math.max(maxRetries, accountCount);
   let lastStatus = 500;
   let lastErrBody = "";
   let lastRetryAfter: string | null = null;
@@ -143,11 +150,7 @@ export async function proxyWithRetry(
   resp.on("close", abortRequest);
 
   try {
-    for (
-      let attempt = 0;
-      attempt < Math.max(maxRetries, manager.accountCount);
-      attempt++
-    ) {
+    for (let attempt = 0; attempt < retryLimit; attempt++) {
       const result = manager.getNextAccount();
       if (!result.account) {
         return accountUnavailable(resp, result, manager.provider);
@@ -240,12 +243,10 @@ export async function proxyWithRetry(
           accountScopedFailure,
           lastErrBody.slice(0, 500),
         );
-        if (attempt < Math.max(maxRetries, manager.accountCount) - 1) {
+        if (attempt < retryLimit - 1) {
           continue;
         }
-      }
-
-      if (lastStatus === 401) {
+      } else if (lastStatus === 401) {
         // Only refresh once per account per proxy attempt. A second 401 after a
         // successful refresh usually means the cause isn't the access token (bad
         // header, account state, server-side issue) — refreshing again would
