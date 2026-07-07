@@ -405,6 +405,58 @@ test("loadConfig normalizes debug mode", () => {
   }
 });
 
+test("loadConfig normalizes provider reasoning levels", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(
+      configPath,
+      [
+        "api-keys:",
+        "  - sk-test",
+        "reasoning:",
+        "  anthropic: max",
+        "  codex: high",
+      ].join("\n"),
+    );
+
+    const config = loadConfig(configPath);
+
+    assert.deepEqual(config.reasoning, { anthropic: "max", codex: "high" });
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig ignores invalid provider reasoning levels with warnings", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  const originalWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (msg?: unknown) => warnings.push(String(msg));
+  try {
+    fs.writeFileSync(
+      configPath,
+      [
+        "api-keys:",
+        "  - sk-test",
+        "reasoning:",
+        "  anthropic: extreme",
+        "  codex: max",
+      ].join("\n"),
+    );
+
+    const config = loadConfig(configPath);
+
+    assert.deepEqual(config.reasoning, {});
+    assert.ok(warnings.some((w) => w.includes("reasoning.anthropic")));
+    assert.ok(warnings.some((w) => w.includes("reasoning.codex")));
+  } finally {
+    console.warn = originalWarn;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ══════════════════════════════════════════════════
 // translator.ts — model resolution
 // ══════════════════════════════════════════════════

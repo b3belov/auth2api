@@ -49,6 +49,21 @@ export interface StatsConfig {
   enabled: boolean;
 }
 
+export type AnthropicReasoningLevel =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "max";
+
+export type CodexReasoningLevel = "minimal" | "low" | "medium" | "high";
+
+export interface ReasoningConfig {
+  anthropic?: AnthropicReasoningLevel;
+  codex?: CodexReasoningLevel;
+}
+
 export type DebugMode = "off" | "errors" | "verbose";
 
 export interface Config {
@@ -60,6 +75,7 @@ export interface Config {
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
   stats: StatsConfig;
+  reasoning: ReasoningConfig;
   debug: DebugMode;
 }
 
@@ -86,8 +102,25 @@ const DEFAULT_RAW: RawConfig = {
   stats: {
     enabled: true,
   },
+  reasoning: {},
   debug: "off",
 };
+
+const ANTHROPIC_REASONING_LEVELS = new Set<AnthropicReasoningLevel>([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "max",
+]);
+
+const CODEX_REASONING_LEVELS = new Set<CodexReasoningLevel>([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+]);
 
 function normalizeDebugMode(value: unknown): DebugMode {
   if (value === true) return "errors";
@@ -95,6 +128,38 @@ function normalizeDebugMode(value: unknown): DebugMode {
   if (value === "off" || value === "errors" || value === "verbose")
     return value;
   return "off";
+}
+
+function normalizeReasoningConfig(value: unknown): ReasoningConfig {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  const reasoning: ReasoningConfig = {};
+
+  if (raw.anthropic !== undefined) {
+    if (
+      typeof raw.anthropic === "string" &&
+      ANTHROPIC_REASONING_LEVELS.has(raw.anthropic as AnthropicReasoningLevel)
+    ) {
+      reasoning.anthropic = raw.anthropic as AnthropicReasoningLevel;
+    } else {
+      console.warn(
+        `Ignoring invalid reasoning.anthropic value: ${String(raw.anthropic)}`,
+      );
+    }
+  }
+
+  if (raw.codex !== undefined) {
+    if (
+      typeof raw.codex === "string" &&
+      CODEX_REASONING_LEVELS.has(raw.codex as CodexReasoningLevel)
+    ) {
+      reasoning.codex = raw.codex as CodexReasoningLevel;
+    } else {
+      console.warn(`Ignoring invalid reasoning.codex value: ${String(raw.codex)}`);
+    }
+  }
+
+  return reasoning;
 }
 
 export function isDebugLevel(
@@ -132,10 +197,12 @@ export function loadConfig(configPath?: string): Config {
       cloaking: { ...DEFAULT_RAW.cloaking, ...(parsed.cloaking || {}) },
       timeouts: { ...DEFAULT_RAW.timeouts, ...(parsed.timeouts || {}) },
       stats: { ...DEFAULT_RAW.stats, ...(parsed.stats || {}) },
+      reasoning: { ...DEFAULT_RAW.reasoning, ...(parsed.reasoning || {}) },
     };
   }
 
   raw.debug = normalizeDebugMode(raw.debug);
+  raw.reasoning = normalizeReasoningConfig(raw.reasoning);
 
   // Auto-generate API key if none configured
   if (!raw["api-keys"] || raw["api-keys"].length === 0) {
