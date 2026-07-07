@@ -264,7 +264,7 @@ docker run -d \
   auth2api
 ```
 
-在容器内，默认的 `auth-dir: "~/.auth2api"` 会解析为 `/root/.auth2api`；除非你在配置中明确设置 `auth-dir: "/data"`，否则请保持 volume 挂载到该目录。
+在容器内，默认的 `auth-dir: "~/.auth2api"` 会解析为 `/root/.auth2api`；除非你在配置中明确设置 `auth-dir: "/data"` 并将 token volume 挂载到 `/data`，否则请保持 volume 挂载到该目录。
 
 或者使用 docker-compose：
 

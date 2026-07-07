@@ -264,7 +264,7 @@ docker run -d \
   auth2api
 ```
 
-Inside the container, the default `auth-dir: "~/.auth2api"` resolves to `/root/.auth2api`; keep the volume mounted there unless you explicitly set `auth-dir: "/data"` in your config.
+Inside the container, the default `auth-dir: "~/.auth2api"` resolves to `/root/.auth2api`; keep the volume mounted there unless you explicitly set `auth-dir: "/data"` in your config and mount the token volume at `/data`.
 
 Or with docker-compose:
 

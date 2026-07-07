@@ -1,9 +1,16 @@
 .git
 .gitignore
+.superpowers
 node_modules
 dist
 config.yaml
+.auth2api
 .env
+.env*
+claude-*.json
+codex-*.json
+cursor-*.json
+stats.jsonl
 *.log
 .DS_Store
 .cursor
