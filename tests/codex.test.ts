@@ -689,6 +689,33 @@ test("normalizeCodexResponsesBody preserves explicit values", () => {
   assert.equal(out.instructions, "custom prompt");
 });
 
+test("normalizeCodexResponsesBody rejects function_call input items with empty names", () => {
+  assert.throws(
+    () =>
+      normalizeCodexResponsesBody({
+        model: "gpt-5.5",
+        input: [
+          {
+            type: "function_call",
+            call_id: "call_1",
+            name: "",
+            arguments: "{}",
+          },
+        ],
+      }),
+    (err: any) => {
+      assert.equal(err.name, "ResponsesTranslationError");
+      assert.equal(err.status, 400);
+      assert.equal(err.code, "invalid_tool_call_name");
+      assert.match(
+        err.message,
+        /input\[0\]\.name must be a non-empty string/,
+      );
+      return true;
+    },
+  );
+});
+
 test("normalizeCodexResponsesBody handles empty/non-object input safely", () => {
   assert.equal(normalizeCodexResponsesBody(null), null);
   assert.equal(normalizeCodexResponsesBody(undefined), undefined);
