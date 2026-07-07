@@ -25,6 +25,7 @@ import {
 import { normalizeCursorResponsesBody } from "../upstream/cursor-api";
 import {
   applyCodexReasoningDefault,
+  ResponsesTranslationError,
   chatToResponsesRequest,
   responsesToChatCompletion,
   responsesSSEToChat,
@@ -59,6 +60,21 @@ function internalError(resp: ExpressResponse): void {
   }
 }
 
+function sendResponsesTranslationError(
+  resp: ExpressResponse,
+  err: unknown,
+): boolean {
+  if (!(err instanceof ResponsesTranslationError)) return false;
+  resp.status(err.status).json({
+    error: {
+      message: err.message,
+      type: "invalid_request_error",
+      code: err.code,
+    },
+  });
+  return true;
+}
+
 /**
  * Codex-specific path for /v1/chat/completions. Translates the incoming
  * Chat Completions body into a Responses body, applies codex's required
@@ -76,9 +92,13 @@ async function proxyCodexChatCompletions(args: {
   stream: boolean;
 }): Promise<void> {
   const { req, resp, config, provider, body, model, stream } = args;
-  const responsesBody = normalizeCodexResponsesBody(
-    chatToResponsesRequest(body),
-  );
+  let responsesBody: any;
+  try {
+    responsesBody = normalizeCodexResponsesBody(chatToResponsesRequest(body));
+  } catch (err) {
+    if (sendResponsesTranslationError(resp, err)) return;
+    throw err;
+  }
   applyCodexReasoningDefault(responsesBody, config.reasoning?.codex);
   // codex's ChatGPT-account backend rejects a couple of public-Responses
   // fields. Strip them here — they are not load-bearing and the backend
@@ -211,7 +231,13 @@ async function proxyCodexResponses(args: {
   stream: boolean;
 }): Promise<void> {
   const { req, resp, config, provider, body, model, stream } = args;
-  const responsesBody = normalizeCodexResponsesBody(body);
+  let responsesBody: any;
+  try {
+    responsesBody = normalizeCodexResponsesBody(body);
+  } catch (err) {
+    if (sendResponsesTranslationError(resp, err)) return;
+    throw err;
+  }
   applyCodexReasoningDefault(responsesBody, config.reasoning?.codex);
   delete responsesBody.max_output_tokens;
   delete responsesBody.parallel_tool_calls;

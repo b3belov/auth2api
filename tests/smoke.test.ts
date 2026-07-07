@@ -1879,6 +1879,59 @@ test("codex /v1/responses sanitises body, forces upstream stream:true, and aggre
   assert.match(streamResp.body, /event: response\.completed/);
 });
 
+test("codex /v1/responses rejects function_call input items with empty names locally", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-empty-name@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  let upstreamCalls = 0;
+  const restoreFetch = withMockedFetch(async () => {
+    upstreamCalls += 1;
+    throw new Error("upstream should not be called for invalid input");
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      input: [
+        {
+          type: "function_call",
+          call_id: "call_1",
+          name: "",
+          arguments: "{}",
+        },
+      ],
+      stream: false,
+    },
+  });
+
+  assert.equal(resp.status, 400);
+  assert.equal(resp.body.error.type, "invalid_request_error");
+  assert.equal(resp.body.error.code, "invalid_tool_call_name");
+  assert.match(
+    resp.body.error.message,
+    /input\[0\]\.name must be a non-empty string/,
+  );
+  assert.equal(upstreamCalls, 0);
+});
+
 test("codex responses compact proxies standalone compaction endpoint", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(
