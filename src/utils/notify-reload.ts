@@ -33,8 +33,8 @@ export function normalizeNotifyHost(configured: string | undefined): string {
 export async function notifyServerReload(config: Config): Promise<void> {
   const host = normalizeNotifyHost(config.host);
   const port = config.port;
-  // Set preserves insertion order; pick the first configured key.
-  const apiKey = Array.from(config["api-keys"])[0];
+  const apiKey =
+    [...(config["admin-api-keys"] || [])][0] || [...config["api-keys"]][0];
   if (!apiKey) return; // loadConfig always seeds at least one key
   const url = `http://${host}:${port}/admin/reload`;
 
@@ -71,8 +71,8 @@ export async function notifyServerReload(config: Config): Promise<void> {
   if (resp.status === 401 || resp.status === 403) {
     console.warn(
       `auth2api server is running but rejected the reload (HTTP ${resp.status}). ` +
-        `The api-keys in config.yaml may differ from the running server's; ` +
-        `restart the server to pick up the new token.`,
+        `The admin-api-keys in config.yaml may differ from the running server's; ` +
+        `restart the server to pick up the new key set.`,
     );
     return;
   }

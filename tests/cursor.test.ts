@@ -51,6 +51,7 @@ function makeConfig(): Config {
     port: 0,
     "auth-dir": "/tmp/auth2api-test",
     "api-keys": new Set(["test-key"]),
+    "admin-api-keys": new Set(["test-key"]),
     "body-limit": "200mb",
     cloaking: {
       "cli-version": "2.1.88",

@@ -52,6 +52,35 @@ function openaiErrorBody(status: number, body: string): any {
   }
 }
 
+function codexAccountScopedError(
+  status: number,
+  body: string,
+): "forbidden" | null {
+  if (status !== 400 && status !== 403) return null;
+  const text = body.toLowerCase();
+  const entitlementUpgradePhrases = [
+    "please upgrade",
+    "upgrade your plan",
+    "upgrade to plus",
+    "upgrade to pro",
+    "upgrade to chatgpt plus",
+    "upgrade to chatgpt pro",
+    "upgrade to a paid plan",
+    "plan upgrade required",
+    "subscription upgrade required",
+  ];
+  if (
+    text.includes("model not supported") ||
+    text.includes("not available for this account") ||
+    text.includes("requires chatgpt plus") ||
+    text.includes("requires chatgpt pro") ||
+    entitlementUpgradePhrases.some((phrase) => text.includes(phrase))
+  ) {
+    return "forbidden";
+  }
+  return null;
+}
+
 function internalError(resp: ExpressResponse): void {
   if (!resp.headersSent) {
     resp.status(500).json({ error: { message: "Internal server error" } });
@@ -206,6 +235,7 @@ async function proxyCodexChatCompletions(args: {
       resp.json(completion);
     },
     errorAdapter: openaiErrorBody,
+    classifyAccountScopedError: codexAccountScopedError,
   });
 }
 
@@ -378,6 +408,7 @@ async function proxyCodexResponses(args: {
       resp.json(responseBody);
     },
     errorAdapter: openaiErrorBody,
+    classifyAccountScopedError: codexAccountScopedError,
   });
 }
 
@@ -861,6 +892,7 @@ export function createResponsesCompactHandler(
           tagStatsUsage(resp, codexCompactUsage);
         },
         errorAdapter: openaiErrorBody,
+        classifyAccountScopedError: codexAccountScopedError,
       });
     } catch (err: any) {
       console.error("Responses compact error:", err.message);

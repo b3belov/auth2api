@@ -71,6 +71,7 @@ export interface Config {
   port: number;
   "auth-dir": string;
   "api-keys": Set<string>;
+  "admin-api-keys": Set<string>;
   "body-limit": string;
   cloaking: CloakingConfig;
   timeouts: TimeoutConfig;
@@ -80,8 +81,9 @@ export interface Config {
 }
 
 // Raw config shape from YAML (api-keys is an array, not a Set)
-interface RawConfig extends Omit<Config, "api-keys"> {
+interface RawConfig extends Omit<Config, "api-keys" | "admin-api-keys"> {
   "api-keys": string[];
+  "admin-api-keys": string[];
 }
 
 const DEFAULT_RAW: RawConfig = {
@@ -89,6 +91,7 @@ const DEFAULT_RAW: RawConfig = {
   port: 8317,
   "auth-dir": "~/.auth2api",
   "api-keys": [],
+  "admin-api-keys": [],
   "body-limit": "200mb",
   cloaking: {
     "cli-version": "2.1.88",
@@ -164,6 +167,42 @@ function normalizeReasoningConfig(value: unknown): ReasoningConfig {
   return reasoning;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+export function normalizeStringList(value: unknown, key: string): string[] {
+  if (value == null) return [];
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? [trimmed] : [];
+  }
+  if (!Array.isArray(value)) {
+    console.warn(`Ignoring invalid ${key}: expected string or string array`);
+    return [];
+  }
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") {
+      console.warn(`Ignoring non-string item in ${key}: ${String(item)}`);
+      continue;
+    }
+    const trimmed = item.trim();
+    if (trimmed) out.push(trimmed);
+  }
+  return out;
+}
+
+function readConfigFile(filePath: string): Partial<RawConfig> {
+  const content = fs.readFileSync(filePath, "utf-8");
+  const parsed = yaml.load(content);
+  if (parsed == null) return {};
+  if (!isRecord(parsed)) {
+    throw new Error("Config file must contain a YAML object");
+  }
+  return parsed as Partial<RawConfig>;
+}
+
 export function isDebugLevel(
   debug: DebugMode,
   level: Exclude<DebugMode, "off">,
@@ -191,8 +230,7 @@ export function loadConfig(configPath?: string): Config {
     console.log(`Config file not found at ${filePath}, using defaults`);
     raw = { ...DEFAULT_RAW };
   } else {
-    const content = fs.readFileSync(filePath, "utf-8");
-    const parsed = yaml.load(content) as Partial<RawConfig>;
+    const parsed = readConfigFile(filePath);
     raw = {
       ...DEFAULT_RAW,
       ...parsed,
@@ -200,21 +238,39 @@ export function loadConfig(configPath?: string): Config {
       timeouts: { ...DEFAULT_RAW.timeouts, ...(parsed.timeouts || {}) },
       stats: { ...DEFAULT_RAW.stats, ...(parsed.stats || {}) },
       reasoning: { ...DEFAULT_RAW.reasoning, ...(parsed.reasoning || {}) },
+      "api-keys": normalizeStringList(parsed["api-keys"], "api-keys"),
+      "admin-api-keys": normalizeStringList(
+        parsed["admin-api-keys"],
+        "admin-api-keys",
+      ),
     };
   }
 
   raw.debug = normalizeDebugMode(raw.debug);
   raw.reasoning = normalizeReasoningConfig(raw.reasoning);
 
-  // Auto-generate API key if none configured
-  if (!raw["api-keys"] || raw["api-keys"].length === 0) {
+  let shouldPersist = false;
+  if (!raw["api-keys"].length) {
     const key = generateApiKey();
     raw["api-keys"] = [key];
+    shouldPersist = true;
+    console.log(`\nGenerated client API key (saved to ${filePath}):\n\n  ${key}\n`);
+  }
+  if (!raw["admin-api-keys"].length) {
+    const key = generateApiKey();
+    raw["admin-api-keys"] = [key];
+    shouldPersist = true;
+    console.log(`\nGenerated admin API key (saved to ${filePath}):\n\n  ${key}\n`);
+  }
+  if (shouldPersist) {
     fs.writeFileSync(filePath, yaml.dump(raw, { lineWidth: -1 }), {
       mode: 0o600,
     });
-    console.log(`\nGenerated API key (saved to ${filePath}):\n\n  ${key}\n`);
   }
 
-  return { ...raw, "api-keys": new Set(raw["api-keys"]) };
+  return {
+    ...raw,
+    "api-keys": new Set(raw["api-keys"]),
+    "admin-api-keys": new Set(raw["admin-api-keys"]),
+  };
 }

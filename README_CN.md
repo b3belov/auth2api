@@ -89,7 +89,7 @@ node dist/index.js --login --provider=codex --manual
 node dist/index.js
 ```
 
-默认监听地址为 `http://127.0.0.1:8317`。首次启动时，如果 `config.yaml` 中没有配置 API key，会自动生成并写入该文件。
+默认监听地址为 `http://127.0.0.1:8317`。首次启动时，如果 `config.yaml` 中没有配置客户端或管理端 API key，会分别自动生成并写入该文件。
 
 ## 配置
 
@@ -102,7 +102,10 @@ port: 8317
 auth-dir: "~/.auth2api" # OAuth token 存储目录
 
 api-keys:
-  - "your-api-key-here" # 客户端使用这个 key 访问代理
+  - "your-client-api-key-here" # 客户端使用这些 key 访问 /v1、/codex 和 /backend-api/codex
+
+admin-api-keys:
+  - "your-admin-api-key-here" # 运维/管理员使用这些 key 访问 /admin/accounts、/admin/stats 和 /admin/reload
 
 body-limit: "200mb" # 最大 JSON 请求体大小，适合大上下文场景
 
@@ -124,6 +127,8 @@ cloaking:
 
 debug: "off" # off | errors | verbose
 ```
+
+如果任一 key 列表被省略或为空，auth2api 会为该列表生成一个新的 key 并保存到 `config.yaml`。管理端 key 与客户端 key 有意分离，避免应用客户端查看账号状态或触发重载。
 
 `reasoning` 只在客户端没有显式传入 reasoning 配置时作为 provider 默认值生效。Anthropic/Claude 路径使用 `reasoning.anthropic`（`none`、`minimal`、`low`、`medium`、`high`、`max`）；Codex 路径使用 `reasoning.codex`（`minimal`、`low`、`medium`、`high`）。
 
@@ -150,10 +155,10 @@ cloaking:
 
 ```bash
 curl http://127.0.0.1:8317/v1/chat/completions \
-  -H "Authorization: Bearer <your-api-key>" \
+  -H "Authorization: Bearer <your-client-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 1024
   }'
@@ -161,13 +166,19 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 ### 支持的模型
 
-`GET /v1/models` 只列出已登录 provider 的模型。Codex 列表是从 `chatgpt.com/backend-api/codex/models` **实时拉取**(5 分钟缓存 + ETag),始终与你的账号实际可用模型一致。Cursor 会尽量从内部 AvailableModels 端点拉取，失败时使用少量 fallback 模型。当前 ChatGPT 账号支持的 codex 模型集合:
+`GET /v1/models` 只列出已登录 provider 的模型。Codex 列表是从 `chatgpt.com/backend-api/codex/models` **实时拉取**(5 分钟缓存 + ETag),始终与你的账号实际可用模型一致。Cursor 会尽量从内部 AvailableModels 端点拉取，失败时使用少量 fallback 模型。下表合并展示当前声明的 Anthropic 模型、代表性的 Codex 模型以及 Cursor fallback 示例:
 
 | 模型 ID                                              | Provider  | 说明                                         |
 | ---------------------------------------------------- | --------- | -------------------------------------------- |
+| `claude-sonnet-5`                                    | anthropic | Claude Sonnet 5                              |
+| `claude-fable-5`                                     | anthropic | Claude Fable 5                               |
+| `claude-mythos-preview`                              | anthropic | Claude Mythos preview                        |
+| `claude-opus-4-8`                                    | anthropic | Claude Opus 4.8                              |
 | `claude-opus-4-7`                                    | anthropic | Claude Opus 4.7                              |
 | `claude-opus-4-6`                                    | anthropic | Claude Opus 4.6                              |
+| `claude-opus-4-5-20251101`                           | anthropic | Claude Opus 4.5                              |
 | `claude-sonnet-4-6`                                  | anthropic | Claude Sonnet 4.6                            |
+| `claude-sonnet-4-5-20250929`                         | anthropic | Claude Sonnet 4.5                            |
 | `claude-haiku-4-5-20251001`                          | anthropic | Claude Haiku 4.5                             |
 | `claude-haiku-4-5`                                   | anthropic | Claude Haiku 4.5 别名                        |
 | `gpt-5.5`                                            | codex     | GPT-5.5(reasoning model)                     |
@@ -183,10 +194,12 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 auth2api 额外支持以下便捷别名：
 
 - `opus` -> `claude-opus-4-7`
-- `sonnet` -> `claude-sonnet-4-6`
+- `sonnet` -> `claude-sonnet-5`
 - `haiku` -> `claude-haiku-4-5-20251001`
+- `fable` -> `claude-fable-5`
+- `mythos` -> `claude-mythos-preview`
 
-路由规则：根据模型名自动选择账号池。`claude-*` 与裸别名 `opus`/`sonnet`/`haiku` 走 Claude 账号；`gpt-5*`、`o\d`(`o3`、`o4-mini` 等)、`codex-*` 走 Codex 账号；`cursor-*` 和 `cr/*` 走 Cursor 账号。其它型号(`gpt-3.5-*`、`gpt-4*` 等)两个后端都不支持，默认 fallback 到 anthropic。如果对应 provider 未登录，请求会返回 `503 no_account_for_provider`，错误信息中带有需要执行的 `--login` 命令。
+路由规则：根据模型名自动选择账号池。`claude-*` 与裸别名 `opus`/`sonnet`/`haiku`/`fable`/`mythos` 走 Claude 账号；`gpt-5*`、`o\d`(`o3`、`o4-mini` 等)、`codex-*` 走 Codex 账号；`cursor-*` 和 `cr/*` 走 Cursor 账号。其它型号(`gpt-3.5-*`、`gpt-4*` 等)两个后端都不支持，默认 fallback 到 anthropic。如果对应 provider 未登录，请求会返回 `503 no_account_for_provider`，错误信息中带有需要执行的 `--login` 命令。
 
 #### "Cursor 独占" 模式（让 Claude Code / OpenAI SDK 零配置可用）
 
@@ -245,9 +258,9 @@ Decoder 会把 Cursor 上游的 chain-of-thought（reasoning）字节路由到 `
 | `POST /v1/messages`              | Claude 原生消息透传                                  |
 | `POST /v1/messages/count_tokens` | Claude token 计数                                    |
 | `GET /v1/models`                 | 列出可用模型                                         |
-| `GET /admin/accounts`            | 查看账号健康状态（需要 API key）                     |
-| `GET /admin/stats`               | 按客户端/账号/接口三维聚合的调用统计（需要 API key） |
-| `POST /admin/reload`             | 从磁盘重新加载 token（需要 API key）                 |
+| `GET /admin/accounts`            | 查看账号健康状态（需要 admin API key）               |
+| `GET /admin/stats`               | 按客户端/账号/接口三维聚合的调用统计（需要 admin API key） |
+| `POST /admin/reload`             | 从磁盘重新加载 token（需要 admin API key）           |
 | `GET /health`                    | 健康检查                                             |
 
 ## Docker
@@ -259,10 +272,12 @@ docker build -t auth2api .
 # 运行（挂载配置文件与 token 目录）
 docker run -d \
   -p 8317:8317 \
-  -v ~/.auth2api:/data \
+  -v ~/.auth2api:/root/.auth2api \
   -v ./config.yaml:/config/config.yaml \
   auth2api
 ```
+
+在容器内，默认的 `auth-dir: "~/.auth2api"` 会解析为 `/root/.auth2api`；除非你在配置中明确设置 `auth-dir: "/data"` 并将 token volume 挂载到 `/data`，否则请保持 volume 挂载到该目录。
 
 或者使用 docker-compose：
 
@@ -276,7 +291,7 @@ docker-compose up -d
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
-ANTHROPIC_API_KEY=<your-api-key> \
+ANTHROPIC_API_KEY=<your-client-api-key> \
 claude
 ```
 
@@ -294,11 +309,11 @@ auth2api 支持多个 Claude OAuth 账号，每个账号的 token 作为独立�
 
 ## 管理状态
 
-通过 `/admin/accounts` 查看所有账号状态：
+通过 `/admin/accounts` 携带 admin API key 查看所有账号状态：
 
 ```bash
 curl http://127.0.0.1:8317/admin/accounts \
-  -H "Authorization: Bearer <your-api-key>"
+  -H "Authorization: Bearer <your-admin-api-key>"
 ```
 
 响应结构(每个已登录 provider 一组):
@@ -323,7 +338,7 @@ curl http://127.0.0.1:8317/admin/accounts \
 
 ```bash
 curl -X POST http://127.0.0.1:8317/admin/reload \
-  -H "Authorization: Bearer <your-api-key>"
+  -H "Authorization: Bearer <your-admin-api-key>"
 ```
 
 响应结构:
@@ -342,7 +357,7 @@ curl -X POST http://127.0.0.1:8317/admin/reload \
 
 ### 调用统计 `/admin/stats`
 
-每一个通过 API key 鉴权的请求都会被记录一行到 `<auth-dir>/stats.jsonl`，同时维护一份内存聚合视图，服务启动时会自动重放磁盘上的事件以恢复历史数据。
+每一个通过客户端或 admin API key 鉴权的请求都会被记录一行到 `<auth-dir>/stats.jsonl`，同时维护一份内存聚合视图，服务启动时会自动重放磁盘上的事件以恢复历史数据。
 
 `GET /admin/stats` 返回三个互相独立的聚合视图：
 
@@ -353,7 +368,7 @@ curl -X POST http://127.0.0.1:8317/admin/reload \
 
 ```bash
 curl http://127.0.0.1:8317/admin/stats \
-  -H "Authorization: Bearer <your-api-key>"
+  -H "Authorization: Bearer <your-admin-api-key>"
 ```
 
 ```json
@@ -373,7 +388,7 @@ curl http://127.0.0.1:8317/admin/stats \
     "anthropic:alice@example.com": { "provider": "anthropic", "email": "alice@example.com", "requests": 100, ... }
   },
   "byApi": {
-    "POST /v1/chat/completions|claude-sonnet-4-6|anthropic": { "endpoint": "POST /v1/chat/completions", "model": "claude-sonnet-4-6", "provider": "anthropic", "requests": 80, ... }
+    "POST /v1/chat/completions|claude-sonnet-5|anthropic": { "endpoint": "POST /v1/chat/completions", "model": "claude-sonnet-5", "provider": "anthropic", "requests": 80, ... }
   },
   "totals": { "requests": 142, "successes": 140, "failures": 2, ... },
   "generated_at": "2026-05-09T12:00:00Z"
@@ -391,7 +406,7 @@ stats:
 
 - `Notified running auth2api server to reload tokens.` —— 成功,服务已加载新 token。
 - `(no auth2api server detected at <host>:<port> — token saved, will be loaded next start)` —— 连接被拒/超时。常见情形是当前没有服务在跑,不算错误。
-- `auth2api server is running but rejected the reload (HTTP 401/403). …restart the server to pick up the new token.` —— 可执行行动:把 config 改回原 api-key,或重启服务让其加载新 key。
+- `auth2api server is running but rejected the reload (HTTP 401/403). The admin-api-keys in config.yaml may differ from the running server's; restart the server to pick up the new key set.` —— 可执行行动：把 config 改回运行中服务正在使用的 `admin-api-keys`，或重启服务让其加载新 key。
 
 ## 测试
 

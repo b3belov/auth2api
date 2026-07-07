@@ -22,6 +22,7 @@ import {
 } from "../src/auth/refresh-errors";
 import { waitForCallback } from "../src/auth/callback-server";
 import http from "node:http";
+import { createServer } from "../src/server";
 
 // ══════════════════════════════════════════════════
 // utils/jwt.ts
@@ -768,6 +769,7 @@ function makeCodexConfig(
     port: 0,
     "auth-dir": "/tmp",
     "api-keys": new Set(["k"]),
+    "admin-api-keys": new Set(["k"]),
     "body-limit": "1mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -1036,6 +1038,57 @@ test("reload deduplicates concurrent calls (single disk read)", async () => {
   }
 });
 
+test("AccountManager lifecycle starters are idempotent", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-manager-"));
+  const originalSetInterval = globalThis.setInterval;
+  try {
+    let intervalCalls = 0;
+    let refreshCalls = 0;
+    globalThis.setInterval = ((...args: Parameters<typeof setInterval>) => {
+      intervalCalls++;
+      return originalSetInterval(...args);
+    }) as typeof setInterval;
+
+    const manager = new AccountManager(tmpDir, {
+      provider: "anthropic",
+      refresh: async () => {
+        refreshCalls++;
+        return {
+          accessToken: "new",
+          refreshToken: "new-refresh",
+          email: "x@y.z",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+          accountUuid: "acct",
+          provider: "anthropic",
+        };
+      },
+      refreshPolicy: { kind: "expires-lead", leadMs: 86_400_000 },
+    });
+    manager.addAccount({
+      accessToken: "old",
+      refreshToken: "old-refresh",
+      email: "x@y.z",
+      expiresAt: new Date(Date.now() + 1_000).toISOString(),
+      accountUuid: "acct",
+      provider: "anthropic",
+    });
+
+    manager.startAutoRefresh();
+    manager.startAutoRefresh();
+    manager.startStatsLogger();
+    manager.startStatsLogger();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    manager.stopAutoRefresh();
+    manager.stopStatsLogger();
+    assert.equal(intervalCalls, 2);
+    assert.equal(refreshCalls, 1);
+  } finally {
+    globalThis.setInterval = originalSetInterval;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("reload does NOT remove accounts whose disk file was deleted", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
   try {
@@ -1067,6 +1120,76 @@ test("reload does NOT remove accounts whose disk file was deleted", async () => 
   }
 });
 
+test("/admin/reload starts lifecycle timers for providers that gain accounts", async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
+  const registry = buildRegistry(tmpDir);
+  for (const provider of registry.all()) provider.manager.load();
+
+  const lifecycleCalls: Record<string, { refresh: number; stats: number }> = {};
+  const restoreFns: Array<() => void> = [];
+  for (const provider of registry.all()) {
+    lifecycleCalls[provider.id] = { refresh: 0, stats: 0 };
+    const originalRefresh = provider.manager.startAutoRefresh.bind(provider.manager);
+    const originalStats = provider.manager.startStatsLogger.bind(provider.manager);
+    provider.manager.startAutoRefresh = () => {
+      lifecycleCalls[provider.id].refresh++;
+    };
+    provider.manager.startStatsLogger = () => {
+      lifecycleCalls[provider.id].stats++;
+    };
+    restoreFns.push(() => {
+      provider.manager.startAutoRefresh = originalRefresh;
+      provider.manager.startStatsLogger = originalStats;
+    });
+  }
+
+  const config = {
+    ...makeNotifyConfig(),
+    "auth-dir": tmpDir,
+  };
+  const app = createServer(config, registry);
+  const server = http.createServer(app);
+
+  try {
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+
+    saveToken(tmpDir, {
+      accessToken: "new-access",
+      refreshToken: "new-refresh",
+      email: "new@example.com",
+      expiresAt: new Date(Date.now() + 3600_000).toISOString(),
+      accountUuid: "u",
+      provider: "codex",
+    });
+
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/admin/reload`,
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer sk-test" },
+      },
+    );
+    assert.equal(response.status, 200);
+
+    const body = (await response.json()) as {
+      reloaded: Record<string, ReloadStats>;
+    };
+    assert.deepEqual(body.reloaded.codex.added, ["new@example.com"]);
+    assert.equal(registry.get("codex").manager.accountCount, 1);
+    assert.deepEqual(lifecycleCalls.codex, { refresh: 1, stats: 1 });
+    assert.deepEqual(lifecycleCalls.anthropic, { refresh: 0, stats: 0 });
+    assert.deepEqual(lifecycleCalls.cursor, { refresh: 0, stats: 0 });
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((err) => (err ? reject(err) : resolve())),
+    );
+    for (const restore of restoreFns) restore();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 // ══════════════════════════════════════════════════
 // notifyServerReload — best-effort --login → server signal
 // ══════════════════════════════════════════════════
@@ -1080,6 +1203,7 @@ function makeNotifyConfig(): Config2 {
     port: 18399,
     "auth-dir": "/tmp",
     "api-keys": new Set(["sk-test"]),
+    "admin-api-keys": new Set(["sk-test"]),
     "body-limit": "1mb",
     cloaking: { "cli-version": "2.1.88", entrypoint: "cli" },
     timeouts: {
@@ -1125,7 +1249,7 @@ function captureLogs(): {
   };
 }
 
-test("notifyServerReload posts to /admin/reload with the first api-key as Bearer", async () => {
+test("notifyServerReload falls back to the first client api-key as Bearer", async () => {
   let seen: { url: string; init?: RequestInit } | null = null;
   const restoreFetch = withFetchStub(async (input, init) => {
     seen = { url: String(input), init };
@@ -1154,6 +1278,43 @@ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer
   assert.equal(cap.warns.length, 0);
 });
 
+test("notifyServerReload prefers the first admin-api-key as Bearer", async () => {
+  const oldFetch = global.fetch;
+  let seen: { url: string; init?: RequestInit } | null = null;
+  global.fetch = (async (url: any, init?: RequestInit) => {
+    seen = { url: String(url), init };
+    return new Response(JSON.stringify({ reloaded: {}, generated_at: "now" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as any;
+  try {
+    await notifyServerReload({
+      host: "127.0.0.1",
+      port: 18399,
+      "auth-dir": "/tmp/unused",
+      "api-keys": new Set(["sk-client"]),
+      "admin-api-keys": new Set(["sk-admin"]),
+      "body-limit": "1mb",
+      cloaking: {},
+      stats: { enabled: true },
+      reasoning: {},
+      debug: "off",
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+    });
+    assert.equal(
+      (seen!.init?.headers as Record<string, string>)?.Authorization,
+      "Bearer sk-admin",
+    );
+  } finally {
+    global.fetch = oldFetch;
+  }
+});
+
 test("notifyServerReload silently info-logs on ECONNREFUSED (server not running)", async () => {
   const restoreFetch = withFetchStub(async () => {
     const err: any = new TypeError("fetch failed");
@@ -1172,7 +1333,7 @@ test("notifyServerReload silently info-logs on ECONNREFUSED (server not running)
   assert.ok(cap.logs.some((l) => l.includes("no auth2api server detected")));
 });
 
-test("notifyServerReload warns on 401 (api-key mismatch)", async () => {
+test("notifyServerReload warns on 401 (admin-api-key mismatch)", async () => {
   const restoreFetch = withFetchStub(async () => {
     return new Response("unauthorized", { status: 401 });
   });
@@ -1188,7 +1349,7 @@ test("notifyServerReload warns on 401 (api-key mismatch)", async () => {
     cap.warns.some(
       (w) =>
         w.includes("rejected the reload (HTTP 401)") &&
-        w.includes("api-keys in config.yaml may differ"),
+        w.includes("admin-api-keys in config.yaml may differ"),
     ),
   );
 });

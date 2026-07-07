@@ -1,7 +1,7 @@
 import express from "express";
 import { Config, isDebugLevel } from "./config";
 import { ProviderRegistry } from "./providers/registry";
-import { extractApiKey, hashApiKey } from "./utils/common";
+import { extractApiKey, hashApiKey, hasTimingSafeApiKey } from "./utils/common";
 import {
   createChatCompletionsHandler,
   createResponsesCompactHandler,
@@ -49,8 +49,6 @@ export function createServer(
 ): express.Application {
   const app = express();
 
-  app.use(express.json({ limit: config["body-limit"] }));
-
   if (isDebugLevel(config.debug, "verbose")) {
     app.use((req, res, next) => {
       const startedAt = Date.now();
@@ -83,8 +81,9 @@ export function createServer(
     next();
   });
 
-  // Rate limiting middleware
-  app.use("/v1", (req, res, next) => {
+  const protectedRoutes = ["/v1", "/codex", "/backend-api/codex", "/admin"];
+
+  app.use(protectedRoutes, (req, res, next) => {
     const ip = req.ip || req.socket.remoteAddress || "unknown";
     if (!rateLimit(ip)) {
       res.status(429).json({ error: { message: "Too many requests" } });
@@ -93,40 +92,57 @@ export function createServer(
     next();
   });
 
+  const requireApiKeyFor = (
+    allowedKeys: Set<string>,
+    label: "client" | "admin",
+  ): express.RequestHandler => {
+    return (req, res, next) => {
+      const key = extractApiKey(req.headers);
+      if (!key) {
+        res.status(401).json({
+          error: {
+            message:
+              label === "admin" ? "Missing admin API key" : "Missing API key",
+          },
+        });
+        return;
+      }
+      if (!hasTimingSafeApiKey(key, allowedKeys)) {
+        res
+          .status(403)
+          .json({ error: { message: `Invalid ${label} API key` } });
+        return;
+      }
+      // Seed res.locals.stats so the stats-finish middleware can record this
+      // request even if the downstream handler aborts before filling in the
+      // upstream account / model / usage fields.
+      if (statsRecorder) {
+        const ip = req.ip || req.socket.remoteAddress || "unknown";
+        const ua = (req.headers["user-agent"] as string) || "";
+        res.locals.stats = {
+          apiKeyHash: hashApiKey(key),
+          ip,
+          ua,
+          endpoint: `${req.method} ${req.baseUrl}${req.path}`,
+          startedAt: Date.now(),
+          model: null,
+          provider: null,
+          accountEmail: null,
+          usage: null,
+          failureKind: null,
+        };
+      }
+      next();
+    };
+  };
+
   // API key auth middleware — accepts both OpenAI style (Authorization: Bearer)
   // and Anthropic style (x-api-key), so Claude Code and OpenAI clients both work
-  const requireApiKey: express.RequestHandler = (req, res, next) => {
-    const key = extractApiKey(req.headers);
-    if (!key) {
-      res.status(401).json({ error: { message: "Missing API key" } });
-      return;
-    }
-    const valid = config["api-keys"].has(key);
-    if (!valid) {
-      res.status(403).json({ error: { message: "Invalid API key" } });
-      return;
-    }
-    // Seed res.locals.stats so the stats-finish middleware can record this
-    // request even if the downstream handler aborts before filling in the
-    // upstream account / model / usage fields.
-    if (statsRecorder) {
-      const ip = req.ip || req.socket.remoteAddress || "unknown";
-      const ua = (req.headers["user-agent"] as string) || "";
-      res.locals.stats = {
-        apiKeyHash: hashApiKey(key),
-        ip,
-        ua,
-        endpoint: `${req.method} ${req.baseUrl}${req.path}`,
-        startedAt: Date.now(),
-        model: null,
-        provider: null,
-        accountEmail: null,
-        usage: null,
-        failureKind: null,
-      };
-    }
-    next();
-  };
+  const requireClientApiKey = requireApiKeyFor(config["api-keys"], "client");
+  const requireAdminApiKey = requireApiKeyFor(
+    config["admin-api-keys"],
+    "admin",
+  );
 
   // Record one stats event per request that made it past auth. `finish`
   // covers normal responses; `close` covers client disconnects before the
@@ -201,8 +217,13 @@ export function createServer(
     res.json({ status: "ok" });
   });
 
-  app.use("/admin", requireApiKey);
+  app.use("/admin", requireAdminApiKey);
+  app.use(["/v1", "/codex", "/backend-api/codex"], requireClientApiKey);
+
   app.use("/admin", statsFinishMiddleware);
+  app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
+
+  app.use(protectedRoutes, express.json({ limit: config["body-limit"] }));
 
   // GET /admin/stats — three-axis aggregated call statistics.
   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
@@ -246,6 +267,10 @@ export function createServer(
     for (const p of registry.all()) {
       try {
         reloaded[p.id] = await p.manager.reload();
+        if (p.manager.accountCount > 0) {
+          p.manager.startAutoRefresh();
+          p.manager.startStatsLogger();
+        }
       } catch (err: any) {
         reloaded[p.id] = { error: err?.message || String(err) };
       }

@@ -93,6 +93,10 @@ export interface ProxyOptions {
    * client hitting Anthropic upstream) so we don't leak provider-shaped errors.
    */
   errorAdapter?: (status: number, body: string) => any;
+  classifyAccountScopedError?: (
+    status: number,
+    body: string,
+  ) => AccountFailureKind | null;
   maxRetries?: number;
 }
 
@@ -124,7 +128,14 @@ export async function proxyWithRetry(
   options: ProxyOptions,
 ): Promise<void> {
   const { manager } = options;
-  const maxRetries = options.maxRetries ?? MAX_RETRIES;
+  const maxRetries =
+    options.maxRetries !== undefined && Number.isFinite(options.maxRetries)
+      ? options.maxRetries
+      : MAX_RETRIES;
+  const accountCount = Number.isFinite(manager.accountCount)
+    ? manager.accountCount
+    : 0;
+  const retryLimit = Math.max(maxRetries, accountCount);
   let lastStatus = 500;
   let lastErrBody = "";
   let lastRetryAfter: string | null = null;
@@ -139,7 +150,7 @@ export async function proxyWithRetry(
   resp.on("close", abortRequest);
 
   try {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
+    for (let attempt = 0; attempt < retryLimit; attempt++) {
       const result = manager.getNextAccount();
       if (!result.account) {
         return accountUnavailable(resp, result, manager.provider);
@@ -224,7 +235,18 @@ export async function proxyWithRetry(
         /* ignore */
       }
 
-      if (lastStatus === 401) {
+      const accountScopedFailure =
+        options.classifyAccountScopedError?.(lastStatus, lastErrBody) ?? null;
+      if (accountScopedFailure) {
+        manager.recordFailure(
+          account.token.email,
+          accountScopedFailure,
+          lastErrBody.slice(0, 500),
+        );
+        if (attempt < retryLimit - 1) {
+          continue;
+        }
+      } else if (lastStatus === 401) {
         // Only refresh once per account per proxy attempt. A second 401 after a
         // successful refresh usually means the cause isn't the access token (bad
         // header, account state, server-side issue) — refreshing again would
