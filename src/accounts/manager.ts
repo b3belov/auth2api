@@ -507,13 +507,11 @@ export class AccountManager {
   }
 
   startAutoRefresh(): void {
+    if (this.refreshTimer) return;
     const timer = setInterval(
       () =>
         this.refreshAll().catch((err) =>
-          console.error(
-            `[${this.provider}] refresh cycle failed:`,
-            err.message,
-          ),
+          console.error(`[${this.provider}] auto-refresh failed:`, err.message),
         ),
       REFRESH_CHECK_INTERVAL_MS,
     );
@@ -532,6 +530,7 @@ export class AccountManager {
   }
 
   startStatsLogger(): void {
+    if (this.statsTimer) return;
     const timer = setInterval(() => this.logStats(), 5 * 60 * 1000);
     timer.unref();
     this.statsTimer = timer;
