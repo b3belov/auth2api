@@ -111,6 +111,12 @@ timeouts:
   stream-messages-ms: 600000 # stream /v1/messages timeout (10 min, suitable for Claude Code)
   count-tokens-ms: 30000 # /v1/messages/count_tokens timeout
 
+reasoning:
+  # Anthropic/Claude-bound requests: none | minimal | low | medium | high | max
+  # anthropic: "medium"
+  # Codex/OpenAI Responses-bound requests: minimal | low | medium | high
+  # codex: "high"
+
 # Request fingerprinting — controls how auth2api mimics Claude Code CLI
 cloaking:
   cli-version: "2.1.88" # CLI version to impersonate
@@ -118,6 +124,8 @@ cloaking:
 
 debug: "off" # off | errors | verbose
 ```
+
+`reasoning` sets provider-specific defaults only when the client did not already request reasoning. Anthropic-bound requests use `reasoning.anthropic` (`none`, `minimal`, `low`, `medium`, `high`, `max`); Codex-bound requests use `reasoning.codex` (`minimal`, `low`, `medium`, `high`).
 
 `debug` supports three levels:
 
