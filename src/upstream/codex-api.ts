@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from "uuid";
 import { Config } from "../config";
 import { AvailableAccount } from "../accounts/manager";
 import { withTimeoutSignal } from "../utils/abort";
+import { ResponsesTranslationError } from "./responses-translator";
 
 const BASE_URL = "https://chatgpt.com/backend-api";
 const RESPONSES_PATH = "/codex/responses";
@@ -84,10 +85,23 @@ function buildHeaders(
 export function normalizeCodexResponsesBody(body: any): any {
   if (!body || typeof body !== "object") return body;
   const next: any = { ...body };
+  validateResponsesInputFunctionCallNames(next.input);
   if (next.stream === undefined) next.stream = true;
   if (next.store === undefined) next.store = false;
   if (next.instructions === undefined) next.instructions = "";
   return next;
+}
+
+function validateResponsesInputFunctionCallNames(input: unknown): void {
+  if (!Array.isArray(input)) return;
+  for (const [index, item] of input.entries()) {
+    if (item?.type !== "function_call") continue;
+    if (typeof item.name === "string" && item.name.trim().length > 0) continue;
+    throw new ResponsesTranslationError(
+      `input[${index}].name must be a non-empty string`,
+      "invalid_tool_call_name",
+    );
+  }
 }
 
 /**
