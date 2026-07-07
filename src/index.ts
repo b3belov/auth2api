@@ -182,8 +182,17 @@ export async function startServer(
   const server = app.listen(port, host);
 
   await new Promise<void>((resolve, reject) => {
-    server.once("listening", resolve);
-    server.once("error", reject);
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    const onError = (err: Error) => {
+      server.off("listening", onListening);
+      reject(err);
+    };
+
+    server.once("listening", onListening);
+    server.once("error", onError);
   });
 
   console.log(`auth2api running on http://${host}:${port}`);
