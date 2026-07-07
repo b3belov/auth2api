@@ -1,4 +1,5 @@
 import { v4 as uuidv4 } from "uuid";
+import type { AnthropicReasoningLevel } from "../config";
 import { UsageData } from "../accounts/manager";
 
 function compactUuid(): string {
@@ -89,6 +90,14 @@ function applyThinking(
   if (summary && summary !== "auto") {
     anthropicBody.thinking.display = "summarized";
   }
+}
+
+export function applyAnthropicReasoningDefault(
+  anthropicBody: any,
+  effort?: AnthropicReasoningLevel,
+): void {
+  if (!effort || anthropicBody.thinking !== undefined) return;
+  applyThinking(anthropicBody, effort);
 }
 
 function disableThinkingIfToolChoiceForced(anthropicBody: any): void {

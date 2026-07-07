@@ -111,6 +111,12 @@ timeouts:
   stream-messages-ms: 600000 # 流式 /v1/messages 超时（10 分钟，适合 Claude Code 长任务）
   count-tokens-ms: 30000 # /v1/messages/count_tokens 超时
 
+reasoning:
+  # Anthropic/Claude 路径：none | minimal | low | medium | high | max
+  # anthropic: "medium"
+  # Codex/OpenAI Responses 路径：minimal | low | medium | high
+  # codex: "high"
+
 # 请求指纹 — 控制 auth2api 如何模拟 Claude Code CLI
 cloaking:
   cli-version: "2.1.88" # 模拟的 CLI 版本号
@@ -118,6 +124,8 @@ cloaking:
 
 debug: "off" # off | errors | verbose
 ```
+
+`reasoning` 只在客户端没有显式传入 reasoning 配置时作为 provider 默认值生效。Anthropic/Claude 路径使用 `reasoning.anthropic`（`none`、`minimal`、`low`、`medium`、`high`、`max`）；Codex 路径使用 `reasoning.codex`（`minimal`、`low`、`medium`、`high`）。
 
 `debug` 支持三级日志：
 

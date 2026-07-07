@@ -3,11 +3,15 @@ import { Config, isDebugLevel } from "../config";
 import { extractUsage } from "../accounts/manager";
 import { ProviderRegistry } from "../providers/registry";
 import { proxyWithRetry } from "../utils/http";
-import { resolveModel } from "../upstream/translator";
+import {
+  applyAnthropicReasoningDefault,
+  resolveModel,
+} from "../upstream/translator";
 import { handleStreamingResponse } from "../upstream/streaming";
 import { normalizeCodexResponsesBody } from "../upstream/codex-api";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
+  applyCodexReasoningDefault,
   ResponsesTranslationError,
   anthropicToResponsesRequest,
   responsesToAnthropicMessage,
@@ -65,6 +69,7 @@ async function proxyCodexMessages(args: {
     if (sendResponsesTranslationError(resp, err)) return;
     throw err;
   }
+  applyCodexReasoningDefault(responsesBody, config.reasoning?.codex);
   // codex's ChatGPT-account backend rejects `max_output_tokens` even
   // though the public OpenAI Responses API accepts it. Anthropic Messages
   // requires `max_tokens` so the translator always emits this field —
@@ -239,16 +244,22 @@ export function createMessagesHandler(
       // because converting Cursor's protobuf reply to Anthropic non-stream
       // JSON is a separate adapter we haven't written yet.
       const stream = provider.id === "cursor" ? true : !!body.stream;
+      const upstreamBody = { ...body };
+      applyAnthropicReasoningDefault(
+        upstreamBody,
+        config.reasoning?.anthropic,
+      );
 
       await proxyWithRetry("Messages", resp, config, {
         manager: provider.manager,
         upstream: (account, signal) => {
           const cloaked =
             provider.applyCloaking?.({
+              body: upstreamBody,
               request: req,
               account,
               config,
-            }) ?? body;
+            }) ?? upstreamBody;
           return provider.callMessages({
             body: cloaked,
             request: req,

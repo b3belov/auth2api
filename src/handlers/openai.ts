@@ -7,6 +7,7 @@ import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
   resolveModel,
   openaiToAnthropic,
+  applyAnthropicReasoningDefault,
   anthropicToOpenai,
   createStreamState,
   anthropicSSEToChat,
@@ -23,6 +24,7 @@ import {
 } from "../upstream/codex-api";
 import { normalizeCursorResponsesBody } from "../upstream/cursor-api";
 import {
+  applyCodexReasoningDefault,
   ResponsesTranslationError,
   chatToResponsesRequest,
   responsesToChatCompletion,
@@ -97,6 +99,7 @@ async function proxyCodexChatCompletions(args: {
     if (sendResponsesTranslationError(resp, err)) return;
     throw err;
   }
+  applyCodexReasoningDefault(responsesBody, config.reasoning?.codex);
   // codex's ChatGPT-account backend rejects a couple of public-Responses
   // fields. Strip them here — they are not load-bearing and the backend
   // applies its own caps from the user's ChatGPT plan.
@@ -235,6 +238,7 @@ async function proxyCodexResponses(args: {
     if (sendResponsesTranslationError(resp, err)) return;
     throw err;
   }
+  applyCodexReasoningDefault(responsesBody, config.reasoning?.codex);
   delete responsesBody.max_output_tokens;
   delete responsesBody.parallel_tool_calls;
   // Force the upstream to stream regardless of the client's request — the
@@ -571,6 +575,10 @@ export function createChatCompletionsHandler(
         body.response_format?.type === "json_object" ||
         body.response_format?.type === "json_schema";
       const translatedBody = openaiToAnthropic(body);
+      applyAnthropicReasoningDefault(
+        translatedBody,
+        config.reasoning?.anthropic,
+      );
 
       if (isDebugLevel(config.debug, "verbose")) {
         console.log(
@@ -710,6 +718,10 @@ export function createResponsesHandler(
         body.text?.format?.type === "json_object" ||
         body.text?.format?.type === "json_schema";
       const translatedBody = responsesToAnthropic(body);
+      applyAnthropicReasoningDefault(
+        translatedBody,
+        config.reasoning?.anthropic,
+      );
 
       await proxyWithRetry("Responses", resp, config, {
         manager: provider.manager,

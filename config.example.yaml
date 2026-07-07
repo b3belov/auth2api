@@ -26,6 +26,15 @@ timeouts:
 stats:
   enabled: true
 
+# Provider-specific reasoning defaults. These fill in missing client settings
+# without overriding explicit reasoning_effort / reasoning / thinking fields.
+# Omit a key to keep that provider's current no-default behavior.
+reasoning:
+  # Anthropic/Claude-bound requests: none | minimal | low | medium | high | max
+  # anthropic: "medium"
+  # Codex/OpenAI Responses-bound requests: minimal | low | medium | high
+  # codex: "high"
+
 # Debug logging level:
 # off = no extra logs
 # errors = upstream/network failure details
