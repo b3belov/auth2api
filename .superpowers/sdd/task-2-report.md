@@ -55,3 +55,27 @@ npm run build
 ```
 
 Result: passed.
+
+---
+
+## Review Fix Follow-up
+
+### Fix summary
+
+- Updated `src/auth/browser-oauth.ts` so the OAuth callback listener binds only to loopback, but now accepts both `127.0.0.1` and `::1` by starting paired loopback-only listeners on the same callback port.
+- Kept the auth-start trust boundary unchanged: `isLoopbackRequest` still relies only on `req.socket.remoteAddress`.
+- Changed terminal cleanup so callback completion waits for listener shutdown before resolving the in-flight login, preventing a fast retry from racing port teardown and hitting `EADDRINUSE`.
+- Hardened partial-start failure handling so if one loopback listener fails during startup, any already-open sibling listener is closed before the startup failure is surfaced.
+
+### Tests/commands run and result
+
+- `npm run build` - passed
+
+### Files changed
+
+- `src/auth/browser-oauth.ts`
+- `.superpowers/sdd/task-2-report.md`
+
+### Any concerns
+
+- No new concerns beyond the existing task scope choice to defer automated coverage for this area to Task 5.

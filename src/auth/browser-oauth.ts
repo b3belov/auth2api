@@ -6,6 +6,7 @@ import { generatePKCECodes } from "./pkce";
 import { Provider } from "../providers/types";
 
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
+const LOOPBACK_HOSTS = ["127.0.0.1", "::1"] as const;
 
 const inFlight = new Map<string, Promise<void>>();
 
@@ -53,6 +54,19 @@ export interface BrowserOAuthHandlerOptions {
   timeoutMs?: number;
 }
 
+function closeServer(server: http.Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.close((err) => {
+      if (err) {
+        reject(err);
+        return;
+      }
+
+      resolve();
+    });
+  });
+}
+
 function startBrowserCallback(options: {
   provider: Provider;
   state: string;
@@ -69,14 +83,16 @@ function startBrowserCallback(options: {
   return new Promise((resolveStarted, rejectStarted) => {
     let resolveDone!: () => void;
     let rejectDone!: (err: Error) => void;
-    let listening = false;
-    let closed = false;
+    let settled = false;
+    let startupFailed = false;
+    let startupResolved = false;
+    const listeningServers = new Set<http.Server>();
     const done = new Promise<void>((resolve, reject) => {
       resolveDone = resolve;
       rejectDone = reject;
     });
 
-    const server = http.createServer(async (req, res) => {
+    const requestHandler: http.RequestListener = async (req, res) => {
       const url = new URL(req.url || "/", `http://localhost:${port}`);
 
       if (url.pathname !== callbackPath) {
@@ -90,8 +106,7 @@ function startBrowserCallback(options: {
         const message = `OAuth error: ${error}`;
         res.writeHead(400, { "Content-Type": "text/html" });
         res.end(page(`${displayName} Login Failed`, escapeHtml(message)));
-        cleanup();
-        rejectDone(new Error(message));
+        await finish(new Error(message));
         return;
       }
 
@@ -107,8 +122,7 @@ function startBrowserCallback(options: {
             "The callback was missing an authorization code or state.",
           ),
         );
-        cleanup();
-        rejectDone(new Error(message));
+        await finish(new Error(message));
         return;
       }
 
@@ -130,39 +144,103 @@ function startBrowserCallback(options: {
             `Account ${escapeHtml(token.email)} was saved. You can close this tab.`,
           ),
         );
-        cleanup();
-        resolveDone();
+        await finish();
       } catch (err: any) {
         const message = err?.message || String(err);
         res.writeHead(400, { "Content-Type": "text/html" });
         res.end(page(`${displayName} Login Failed`, escapeHtml(message)));
-        cleanup();
-        rejectDone(new Error(message));
+        await finish(new Error(message));
       }
-    });
+    };
 
     const timer = setTimeout(() => {
-      cleanup();
-      rejectDone(new Error(`${displayName} OAuth callback timeout`));
+      void finish(new Error(`${displayName} OAuth callback timeout`));
     }, timeoutMs);
 
-    function cleanup() {
-      if (closed) return;
-      closed = true;
+    async function shutdownServers(): Promise<void> {
       clearTimeout(timer);
-      if (listening) server.close();
+      const servers = Array.from(listeningServers);
+      if (servers.length === 0) return;
+
+      await Promise.all(servers.map((server) => closeServer(server)));
     }
 
-    server.once("error", (err) => {
-      cleanup();
+    async function finish(error?: Error): Promise<void> {
+      if (settled) return;
+      settled = true;
+
+      try {
+        await shutdownServers();
+      } catch (closeErr) {
+        const closeError =
+          closeErr instanceof Error ? closeErr : new Error(String(closeErr));
+        if (!error) {
+          error = closeError;
+        } else {
+          error = new Error(`${error.message}; ${closeError.message}`);
+        }
+      }
+
+      if (error) {
+        rejectDone(error);
+        return;
+      }
+
+      resolveDone();
+    }
+
+    async function failStartup(err: Error): Promise<void> {
+      if (startupResolved || startupFailed) return;
+      startupFailed = true;
+
+      try {
+        await shutdownServers();
+      } catch (closeErr) {
+        const closeError =
+          closeErr instanceof Error ? closeErr : new Error(String(closeErr));
+        err = new Error(`${err.message}; ${closeError.message}`);
+      }
+
       rejectStarted(err);
-      rejectDone(err instanceof Error ? err : new Error(String(err)));
+      rejectDone(err);
+    }
+
+    const servers = LOOPBACK_HOSTS.map((host) => {
+      const server = http.createServer(requestHandler);
+
+      server.once("error", (err) => {
+        const serverError =
+          err instanceof Error ? err : new Error(String(err));
+
+        if (startupResolved) {
+          void finish(serverError);
+          return;
+        }
+
+        void failStartup(serverError);
+      });
+
+      return { host, server };
     });
 
-    server.listen(port, "127.0.0.1", () => {
-      listening = true;
-      resolveStarted({ done });
-    });
+    let pendingStarts = servers.length;
+
+    for (const { host, server } of servers) {
+      server.listen(
+        host === "::1"
+          ? { port, host, ipv6Only: true }
+          : { port, host },
+        () => {
+          listeningServers.add(server);
+          pendingStarts -= 1;
+
+          if (pendingStarts === 0 && !startupResolved) {
+            startupResolved = true;
+            resolveStarted({ done });
+          }
+        },
+      );
+    }
   });
 }
 
