@@ -179,22 +179,27 @@ export async function startServer(
   const host = config.host || "127.0.0.1";
   const port = config.port;
 
-  const server = app.listen(port, host, () => {
-    console.log(`auth2api running on http://${host}:${port}`);
-    console.log(`Endpoints:`);
-    console.log(`  POST /v1/chat/completions`);
-    console.log(`  POST /v1/responses`);
-    console.log(`  POST /v1/messages`);
-    console.log(`  POST /v1/messages/count_tokens`);
-    console.log(`  GET  /v1/models`);
-    console.log(`  GET  /v1/claude-auth`);
-    console.log(`  GET  /v1/codex-auth`);
-    console.log(`  GET  /admin/accounts`);
-    if (statsRecorder) console.log(`  GET  /admin/stats`);
-    console.log(`  GET  /health`);
+  const server = app.listen(port, host);
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
   });
 
-  process.on("SIGINT", () => {
+  console.log(`auth2api running on http://${host}:${port}`);
+  console.log(`Endpoints:`);
+  console.log(`  POST /v1/chat/completions`);
+  console.log(`  POST /v1/responses`);
+  console.log(`  POST /v1/messages`);
+  console.log(`  POST /v1/messages/count_tokens`);
+  console.log(`  GET  /v1/models`);
+  console.log(`  GET  /v1/claude-auth`);
+  console.log(`  GET  /v1/codex-auth`);
+  console.log(`  GET  /admin/accounts`);
+  if (statsRecorder) console.log(`  GET  /admin/stats`);
+  console.log(`  GET  /health`);
+
+  const handleSigint = () => {
     for (const p of registry.all()) {
       p.manager.stopAutoRefresh();
       p.manager.stopStatsLogger();
@@ -206,6 +211,11 @@ export async function startServer(
       return;
     }
     process.exit(0);
+  };
+
+  process.on("SIGINT", handleSigint);
+  server.once("close", () => {
+    process.off("SIGINT", handleSigint);
   });
 
   return server;

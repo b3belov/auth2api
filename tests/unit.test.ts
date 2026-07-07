@@ -23,6 +23,7 @@ import {
 } from "../src/upstream/translator";
 import { loadConfig, isDebugLevel, resolveAuthDir } from "../src/config";
 import { UsageData } from "../src/accounts/manager";
+import { buildRegistry } from "../src/providers/registry";
 
 // ══════════════════════════════════════════════════
 // utils/common.ts
@@ -1219,6 +1220,8 @@ test("createServer stats endpoint records mounted route prefix", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
   recorder.start(tmp);
+  const registry = buildRegistry(tmp);
+  for (const provider of registry.all()) provider.manager.load();
   const app = createServer(
     {
       host: "",
@@ -1235,7 +1238,7 @@ test("createServer stats endpoint records mounted route prefix", async () => {
       stats: { enabled: true },
       debug: "off",
     } as any,
-    {} as any,
+    registry,
     recorder,
   );
   const server = app.listen(0);
@@ -1259,6 +1262,8 @@ test("createServer stats records client disconnects on close", async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
   const recorder = new StatsRecorder();
   recorder.start(tmp);
+  const registry = buildRegistry(tmp);
+  for (const provider of registry.all()) provider.manager.load();
   const app = createServer(
     {
       host: "",
@@ -1275,7 +1280,7 @@ test("createServer stats records client disconnects on close", async () => {
       stats: { enabled: true },
       debug: "off",
     } as any,
-    {} as any,
+    registry,
     recorder,
   );
   let resolveReached!: () => void;
