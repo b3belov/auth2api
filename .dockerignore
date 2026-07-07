@@ -1,0 +1,13 @@
+.git
+.gitignore
+node_modules
+dist
+config.yaml
+.env
+*.log
+.DS_Store
+.cursor
+.idea
+.vscode
+docs/superpowers/plans
+docs/superpowers/specs

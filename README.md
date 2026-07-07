@@ -259,10 +259,12 @@ docker build -t auth2api .
 # Run (mount your config and token directory)
 docker run -d \
   -p 8317:8317 \
-  -v ~/.auth2api:/data \
+  -v ~/.auth2api:/root/.auth2api \
   -v ./config.yaml:/config/config.yaml \
   auth2api
 ```
+
+Inside the container, the default `auth-dir: "~/.auth2api"` resolves to `/root/.auth2api`; keep the volume mounted there unless you explicitly set `auth-dir: "/data"` in your config.
 
 Or with docker-compose:
 
