@@ -406,6 +406,67 @@ test("loadConfig normalizes debug mode", () => {
   }
 });
 
+test("loadConfig treats empty YAML as an empty config object", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-config-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(configPath, "");
+    const config = loadConfig(configPath);
+    assert.equal(config.host, "");
+    assert.equal(config.port, 8317);
+    assert.equal(config["api-keys"].size, 1);
+    assert.equal(config["admin-api-keys"].size, 1);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig normalizes scalar api-keys instead of splitting characters", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-config-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(
+      configPath,
+      ["api-keys: sk-client", "admin-api-keys: sk-admin"].join("\n"),
+    );
+    const config = loadConfig(configPath);
+    assert.deepEqual([...config["api-keys"]], ["sk-client"]);
+    assert.deepEqual([...config["admin-api-keys"]], ["sk-admin"]);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects non-object YAML config", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-config-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(configPath, "- not\n- an\n- object\n");
+    assert.throws(
+      () => loadConfig(configPath),
+      /Config file must contain a YAML object/,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig backfills missing admin-api-keys without reusing client keys", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-config-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(configPath, "api-keys:\n  - sk-client\n");
+    const config = loadConfig(configPath);
+    assert.deepEqual([...config["api-keys"]], ["sk-client"]);
+    assert.equal(config["admin-api-keys"].size, 1);
+    assert.equal(config["admin-api-keys"].has("sk-client"), false);
+    const persisted = fs.readFileSync(configPath, "utf-8");
+    assert.match(persisted, /admin-api-keys:/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 test("loadConfig normalizes provider reasoning levels", () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-"));
   const configPath = path.join(tmpDir, "config.yaml");

@@ -1152,6 +1152,43 @@ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer
   assert.equal(cap.warns.length, 0);
 });
 
+test("notifyServerReload prefers the first admin-api-key as Bearer", async () => {
+  const oldFetch = global.fetch;
+  let seen: { url: string; init?: RequestInit } | null = null;
+  global.fetch = (async (url: any, init?: RequestInit) => {
+    seen = { url: String(url), init };
+    return new Response(JSON.stringify({ reloaded: {}, generated_at: "now" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as any;
+  try {
+    await notifyServerReload({
+      host: "127.0.0.1",
+      port: 18399,
+      "auth-dir": "/tmp/unused",
+      "api-keys": new Set(["sk-client"]),
+      "admin-api-keys": new Set(["sk-admin"]),
+      "body-limit": "1mb",
+      cloaking: {},
+      stats: { enabled: true },
+      reasoning: {},
+      debug: "off",
+      timeouts: {
+        "messages-ms": 1000,
+        "stream-messages-ms": 1000,
+        "count-tokens-ms": 1000,
+      },
+    });
+    assert.equal(
+      (seen!.init?.headers as Record<string, string>)?.Authorization,
+      "Bearer sk-admin",
+    );
+  } finally {
+    global.fetch = oldFetch;
+  }
+});
+
 test("notifyServerReload silently info-logs on ECONNREFUSED (server not running)", async () => {
   const restoreFetch = withFetchStub(async () => {
     const err: any = new TypeError("fetch failed");
