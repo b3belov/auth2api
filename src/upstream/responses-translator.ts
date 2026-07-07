@@ -14,6 +14,7 @@
  * intentionally not translated — they have no Chat or Messages analog.
  */
 import { v4 as uuidv4 } from "uuid";
+import type { CodexReasoningLevel } from "../config";
 import { readSseEvents } from "./streaming";
 
 function compactUuid(): string {
@@ -47,6 +48,15 @@ export interface DrainedCodexResponses {
   upstreamError: string | null;
   status: string;
   usage: any | null;
+}
+
+export function applyCodexReasoningDefault(
+  responsesBody: any,
+  effort?: CodexReasoningLevel,
+): void {
+  if (!effort || !responsesBody || typeof responsesBody !== "object") return;
+  if (responsesBody.reasoning !== undefined) return;
+  responsesBody.reasoning = { effort };
 }
 
 /**

@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   chatToResponsesRequest,
   anthropicToResponsesRequest,
+  applyCodexReasoningDefault,
   responsesToChatCompletion,
   responsesToAnthropicMessage,
   responsesSSEToChat,
@@ -122,6 +123,37 @@ test("chatToResponsesRequest: maps response_format json_schema and reasoning_eff
   assert.equal(out.text.format.strict, true);
 });
 
+test("applyCodexReasoningDefault applies configured effort only when absent", () => {
+  const body: any = { model: "gpt-5.5", input: "hi" };
+
+  applyCodexReasoningDefault(body, "medium");
+
+  assert.deepEqual(body.reasoning, { effort: "medium" });
+});
+
+test("applyCodexReasoningDefault preserves client reasoning", () => {
+  const body: any = {
+    model: "gpt-5.5",
+    input: "hi",
+    reasoning: { effort: "high" },
+  };
+
+  applyCodexReasoningDefault(body, "low");
+
+  assert.deepEqual(body.reasoning, { effort: "high" });
+});
+
+test("Codex default can be applied after Chat to Responses translation", () => {
+  const translated = chatToResponsesRequest({
+    model: "gpt-5.5",
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  applyCodexReasoningDefault(translated, "low");
+
+  assert.deepEqual(translated.reasoning, { effort: "low" });
+});
+
 // ───────────────── anthropicToResponsesRequest ─────────────────
 
 test("anthropicToResponsesRequest: maps system, max_tokens, thinking", () => {
@@ -200,6 +232,18 @@ test("anthropicToResponsesRequest: array system → instructions joined", () => 
     messages: [{ role: "user", content: "hi" }],
   });
   assert.equal(out.instructions, "Part one.\n\nPart two.");
+});
+
+test("Codex default preserves Anthropic thinking after Messages to Responses translation", () => {
+  const translated = anthropicToResponsesRequest({
+    model: "gpt-5.5",
+    messages: [{ role: "user", content: "hi" }],
+    thinking: { type: "enabled", budget_tokens: 24576 },
+  });
+
+  applyCodexReasoningDefault(translated, "low");
+
+  assert.deepEqual(translated.reasoning, { effort: "high" });
 });
 
 // ───────────────── responsesToChatCompletion (non-stream) ─────────────────

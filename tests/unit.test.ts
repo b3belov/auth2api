@@ -12,6 +12,7 @@ import { handleStreamingResponse } from "../src/upstream/streaming";
 import {
   resolveModel,
   openaiToAnthropic,
+  applyAnthropicReasoningDefault,
   anthropicToOpenai,
   createStreamState,
   anthropicSSEToChat,
@@ -559,6 +560,50 @@ test("openaiToAnthropic translates reasoning_effort to thinking", () => {
   });
   assert.equal(result.thinking.type, "enabled");
   assert.equal(result.thinking.budget_tokens, 24576);
+});
+
+test("applyAnthropicReasoningDefault applies configured thinking only when absent", () => {
+  const body: any = { model: "claude-sonnet-5", max_tokens: 1024 };
+
+  applyAnthropicReasoningDefault(body, "low");
+
+  assert.deepEqual(body.thinking, { type: "enabled", budget_tokens: 1024 });
+});
+
+test("applyAnthropicReasoningDefault preserves client thinking", () => {
+  const body: any = {
+    model: "claude-sonnet-5",
+    max_tokens: 8192,
+    thinking: { type: "enabled", budget_tokens: 4096 },
+  };
+
+  applyAnthropicReasoningDefault(body, "high");
+
+  assert.deepEqual(body.thinking, { type: "enabled", budget_tokens: 4096 });
+});
+
+test("Anthropic default can be applied after OpenAI chat translation", () => {
+  const translated = openaiToAnthropic({
+    model: "sonnet",
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  applyAnthropicReasoningDefault(translated, "medium");
+
+  assert.equal(translated.thinking.type, "enabled");
+  assert.equal(translated.thinking.budget_tokens, 8192);
+});
+
+test("Anthropic default preserves OpenAI reasoning_effort after translation", () => {
+  const translated = openaiToAnthropic({
+    model: "sonnet",
+    reasoning_effort: "high",
+    messages: [{ role: "user", content: "hi" }],
+  });
+
+  applyAnthropicReasoningDefault(translated, "low");
+
+  assert.equal(translated.thinking.budget_tokens, 24576);
 });
 
 test("openaiToAnthropic translates tools", () => {
