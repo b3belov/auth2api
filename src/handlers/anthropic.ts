@@ -8,6 +8,7 @@ import { handleStreamingResponse } from "../upstream/streaming";
 import { normalizeCodexResponsesBody } from "../upstream/codex-api";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
+  ResponsesTranslationError,
   anthropicToResponsesRequest,
   responsesToAnthropicMessage,
   responsesSSEToAnthropic,
@@ -21,6 +22,21 @@ function internalError(resp: ExpressResponse): void {
   } else if (!resp.writableEnded) {
     resp.end();
   }
+}
+
+function sendResponsesTranslationError(
+  resp: ExpressResponse,
+  err: unknown,
+): boolean {
+  if (!(err instanceof ResponsesTranslationError)) return false;
+  resp.status(err.status).json({
+    error: {
+      message: err.message,
+      type: "invalid_request_error",
+      code: err.code,
+    },
+  });
+  return true;
 }
 
 /**
@@ -40,9 +56,15 @@ async function proxyCodexMessages(args: {
 }): Promise<void> {
   const { req, resp, config, provider, body, model } = args;
   const stream = !!body.stream;
-  const responsesBody = normalizeCodexResponsesBody(
-    anthropicToResponsesRequest(body),
-  );
+  let responsesBody: any;
+  try {
+    responsesBody = normalizeCodexResponsesBody(
+      anthropicToResponsesRequest(body),
+    );
+  } catch (err) {
+    if (sendResponsesTranslationError(resp, err)) return;
+    throw err;
+  }
   // codex's ChatGPT-account backend rejects `max_output_tokens` even
   // though the public OpenAI Responses API accepts it. Anthropic Messages
   // requires `max_tokens` so the translator always emits this field —
