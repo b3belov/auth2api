@@ -5,9 +5,13 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 import { AddressInfo } from "node:net";
+import express from "express";
 
 import { Config } from "../src/config";
-import { isLoopbackRequest } from "../src/auth/browser-oauth";
+import {
+  createBrowserOAuthHandler,
+  isLoopbackRequest,
+} from "../src/auth/browser-oauth";
 import { AccountManager } from "../src/accounts/manager";
 import { createServer } from "../src/server";
 import { startServer } from "../src/index";
@@ -56,6 +60,18 @@ async function stopApp(server: http.Server): Promise<void> {
       else resolve();
     });
   });
+}
+
+async function occupyPort(host: string, port: number): Promise<http.Server> {
+  const server = createHttpServer((_req, res) => {
+    res.writeHead(204);
+    res.end();
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, host, resolve);
+  });
+  return server;
 }
 
 function serverAddress(server: http.Server): AddressInfo {
@@ -405,6 +421,55 @@ test("browser OAuth rejects a second in-flight login for the same provider", asy
   assert.match(second.body, /login_in_progress/);
 
   const authUrl = new URL(String(first.headers.location));
+  const state = authUrl.searchParams.get("state");
+  assert.ok(state);
+  await getOnce(
+    `http://127.0.0.1:1455/auth/callback?error=access_denied&state=${state}`,
+  );
+  await waitForBrowserOAuthCleanup();
+});
+
+test("browser OAuth cleans up partial callback startup failure before retry", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
+  const registry = buildRegistry(authDir);
+  for (const provider of registry.all()) provider.manager.load();
+  const app = express();
+  app.get(
+    "/auth",
+    createBrowserOAuthHandler({
+      provider: registry.get("codex"),
+      displayName: "Codex",
+      timeoutMs: 500,
+    }),
+  );
+  const server = createHttpServer(app);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  let blocker: http.Server | undefined = await occupyPort("127.0.0.1", 1455);
+  t.after(async () => {
+    if (blocker) await stopApp(blocker);
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const failedStart = await request({
+    server,
+    method: "GET",
+    path: "/auth",
+  });
+  assert.equal(failedStart.status, 500);
+  assert.match(failedStart.body, /callback_server_start_failed/);
+
+  await stopApp(blocker);
+  blocker = undefined;
+
+  const retry = await request({
+    server,
+    method: "GET",
+    path: "/auth",
+  });
+  assert.equal(retry.status, 302);
+
+  const authUrl = new URL(String(retry.headers.location));
   const state = authUrl.searchParams.get("state");
   assert.ok(state);
   await getOnce(

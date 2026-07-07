@@ -162,7 +162,12 @@ function startBrowserCallback(options: {
       const servers = Array.from(listeningServers);
       if (servers.length === 0) return;
 
-      await Promise.all(servers.map((server) => closeServer(server)));
+      await Promise.all(
+        servers.map(async (server) => {
+          await closeServer(server);
+          listeningServers.delete(server);
+        }),
+      );
     }
 
     async function finish(error?: Error): Promise<void> {
@@ -192,6 +197,7 @@ function startBrowserCallback(options: {
     async function failStartup(err: Error): Promise<void> {
       if (startupResolved || startupFailed) return;
       startupFailed = true;
+      settled = true;
 
       try {
         await shutdownServers();
@@ -202,7 +208,6 @@ function startBrowserCallback(options: {
       }
 
       rejectStarted(err);
-      rejectDone(err);
     }
 
     const servers = LOOPBACK_HOSTS.map((host) => {
@@ -210,6 +215,10 @@ function startBrowserCallback(options: {
 
       server.once("error", (err) => {
         const serverError = err instanceof Error ? err : new Error(String(err));
+
+        if (startupFailed || settled) {
+          return;
+        }
 
         if (startupResolved) {
           void finish(serverError);
@@ -228,6 +237,15 @@ function startBrowserCallback(options: {
       server.listen(
         host === "::1" ? { port, host, ipv6Only: true } : { port, host },
         () => {
+          if (startupFailed || settled) {
+            closeServer(server).catch((err) => {
+              console.error(
+                `[${provider.id}] failed to close late OAuth callback listener: ${err?.message || String(err)}`,
+              );
+            });
+            return;
+          }
+
           listeningServers.add(server);
           pendingStarts -= 1;
 
