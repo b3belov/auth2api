@@ -258,6 +258,10 @@ export function createServer(
     for (const p of registry.all()) {
       try {
         reloaded[p.id] = await p.manager.reload();
+        if (p.manager.accountCount > 0) {
+          p.manager.startAutoRefresh();
+          p.manager.startStatsLogger();
+        }
       } catch (err: any) {
         reloaded[p.id] = { error: err?.message || String(err) };
       }
