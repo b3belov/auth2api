@@ -20,6 +20,26 @@ function compactUuid(): string {
   return uuidv4().replace(/-/g, "");
 }
 
+export class ResponsesTranslationError extends Error {
+  readonly status: number;
+  readonly code: string;
+
+  constructor(message: string, code = "invalid_request") {
+    super(message);
+    this.name = "ResponsesTranslationError";
+    this.status = 400;
+    this.code = code;
+  }
+}
+
+function requireNonEmptyName(value: unknown, path: string): string {
+  if (typeof value === "string" && value.trim().length > 0) return value;
+  throw new ResponsesTranslationError(
+    `${path} must be a non-empty string`,
+    "invalid_tool_call_name",
+  );
+}
+
 /**
  * Drained pieces of a codex Responses-format SSE stream.
  *
@@ -225,7 +245,7 @@ export function chatToResponsesRequest(body: any): any {
   const inputItems: any[] = [];
   const systemTexts: string[] = [];
 
-  for (const msg of body.messages || []) {
+  for (const [messageIndex, msg] of (body.messages || []).entries()) {
     const role = msg.role;
     if (role === "system" || role === "developer") {
       const t = extractText(msg.content);
@@ -253,11 +273,14 @@ export function chatToResponsesRequest(body: any): any {
           content: [{ type: "output_text", text }],
         });
       }
-      for (const tc of msg.tool_calls) {
+      for (const [toolCallIndex, tc] of msg.tool_calls.entries()) {
         inputItems.push({
           type: "function_call",
           call_id: tc.id,
-          name: tc.function?.name || "",
+          name: requireNonEmptyName(
+            tc.function?.name,
+            `messages[${messageIndex}].tool_calls[${toolCallIndex}].function.name`,
+          ),
           arguments: tc.function?.arguments || "{}",
         });
       }
@@ -352,7 +375,7 @@ export function anthropicToResponsesRequest(body: any): any {
   // messages[] → input[]
   // Anthropic messages can carry text / image / tool_use / tool_result blocks.
   const inputItems: any[] = [];
-  for (const msg of body.messages || []) {
+  for (const [messageIndex, msg] of (body.messages || []).entries()) {
     const role = msg.role;
     if (typeof msg.content === "string") {
       inputItems.push({ role, content: msg.content });
@@ -361,7 +384,7 @@ export function anthropicToResponsesRequest(body: any): any {
     if (!Array.isArray(msg.content)) continue;
 
     const textParts: any[] = [];
-    for (const block of msg.content) {
+    for (const [contentIndex, block] of msg.content.entries()) {
       if (block?.type === "text") {
         textParts.push({
           type: role === "assistant" ? "output_text" : "input_text",
@@ -385,7 +408,10 @@ export function anthropicToResponsesRequest(body: any): any {
         inputItems.push({
           type: "function_call",
           call_id: block.id,
-          name: block.name,
+          name: requireNonEmptyName(
+            block.name,
+            `messages[${messageIndex}].content[${contentIndex}].name`,
+          ),
           arguments: JSON.stringify(block.input || {}),
         });
       } else if (block?.type === "tool_result") {

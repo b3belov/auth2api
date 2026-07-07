@@ -102,6 +102,72 @@ test("chatToResponsesRequest: converts assistant tool_calls to function_call ite
   });
 });
 
+test("chatToResponsesRequest: rejects assistant tool_calls with empty names", () => {
+  assert.throws(
+    () =>
+      chatToResponsesRequest({
+        model: "gpt-5.5-medium",
+        messages: [
+          { role: "user", content: "weather?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { name: "", arguments: '{"city":"SF"}' },
+              },
+            ],
+          },
+        ],
+      }),
+    (err: any) => {
+      assert.equal(err.name, "ResponsesTranslationError");
+      assert.equal(err.status, 400);
+      assert.equal(err.code, "invalid_tool_call_name");
+      assert.match(
+        err.message,
+        /messages\[1\]\.tool_calls\[0\]\.function\.name must be a non-empty string/,
+      );
+      return true;
+    },
+  );
+});
+
+test("chatToResponsesRequest: rejects assistant tool_calls with missing function names", () => {
+  assert.throws(
+    () =>
+      chatToResponsesRequest({
+        model: "gpt-5.5-medium",
+        messages: [
+          { role: "user", content: "weather?" },
+          {
+            role: "assistant",
+            content: null,
+            tool_calls: [
+              {
+                id: "call_1",
+                type: "function",
+                function: { arguments: '{"city":"SF"}' },
+              },
+            ],
+          },
+        ],
+      }),
+    (err: any) => {
+      assert.equal(err.name, "ResponsesTranslationError");
+      assert.equal(err.status, 400);
+      assert.equal(err.code, "invalid_tool_call_name");
+      assert.match(
+        err.message,
+        /messages\[1\]\.tool_calls\[0\]\.function\.name must be a non-empty string/,
+      );
+      return true;
+    },
+  );
+});
+
 test("chatToResponsesRequest: maps response_format json_schema and reasoning_effort", () => {
   const out = chatToResponsesRequest({
     model: "gpt-5.5-medium",
@@ -187,6 +253,39 @@ test("anthropicToResponsesRequest: converts tool_use / tool_result blocks", () =
   assert.equal(out.input[2].output, "sunny");
   assert.equal(out.tools[0].name, "get_weather");
   assert.equal(out.tools[0].type, "function");
+});
+
+test("anthropicToResponsesRequest: rejects tool_use blocks with empty names", () => {
+  assert.throws(
+    () =>
+      anthropicToResponsesRequest({
+        model: "claude-sonnet-4-5",
+        max_tokens: 256,
+        messages: [
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "tool_1",
+                name: "   ",
+                input: { city: "SF" },
+              },
+            ],
+          },
+        ],
+      }),
+    (err: any) => {
+      assert.equal(err.name, "ResponsesTranslationError");
+      assert.equal(err.status, 400);
+      assert.equal(err.code, "invalid_tool_call_name");
+      assert.match(
+        err.message,
+        /messages\[0\]\.content\[0\]\.name must be a non-empty string/,
+      );
+      return true;
+    },
+  );
 });
 
 test("anthropicToResponsesRequest: array system → instructions joined", () => {
