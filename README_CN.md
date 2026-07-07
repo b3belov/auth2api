@@ -166,7 +166,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 ### 支持的模型
 
-`GET /v1/models` 只列出已登录 provider 的模型。Codex 列表是从 `chatgpt.com/backend-api/codex/models` **实时拉取**(5 分钟缓存 + ETag),始终与你的账号实际可用模型一致。Cursor 会尽量从内部 AvailableModels 端点拉取，失败时使用少量 fallback 模型。当前 ChatGPT 账号支持的 codex 模型集合:
+`GET /v1/models` 只列出已登录 provider 的模型。Codex 列表是从 `chatgpt.com/backend-api/codex/models` **实时拉取**(5 分钟缓存 + ETag),始终与你的账号实际可用模型一致。Cursor 会尽量从内部 AvailableModels 端点拉取，失败时使用少量 fallback 模型。下表合并展示当前声明的 Anthropic 模型、代表性的 Codex 模型以及 Cursor fallback 示例:
 
 | 模型 ID                                              | Provider  | 说明                                         |
 | ---------------------------------------------------- | --------- | -------------------------------------------- |
@@ -357,7 +357,7 @@ curl -X POST http://127.0.0.1:8317/admin/reload \
 
 ### 调用统计 `/admin/stats`
 
-每一个通过客户端 API key 鉴权的客户端请求都会被记录一行到 `<auth-dir>/stats.jsonl`，同时维护一份内存聚合视图，服务启动时会自动重放磁盘上的事件以恢复历史数据。
+每一个通过客户端或 admin API key 鉴权的请求都会被记录一行到 `<auth-dir>/stats.jsonl`，同时维护一份内存聚合视图，服务启动时会自动重放磁盘上的事件以恢复历史数据。
 
 `GET /admin/stats` 返回三个互相独立的聚合视图：
 

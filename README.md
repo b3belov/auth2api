@@ -166,7 +166,7 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 ### Available models
 
-`GET /v1/models` lists only models for providers you've actually logged in to. The codex list is **fetched live** from `chatgpt.com/backend-api/codex/models` (cached 5 minutes, ETag-aware) so it always matches what your account can actually serve. Cursor models are fetched from Cursor's internal AvailableModels endpoint when possible, with a small fallback list. The current ChatGPT-account-supported set at the time of writing:
+`GET /v1/models` lists only models for providers you've actually logged in to. The codex list is **fetched live** from `chatgpt.com/backend-api/codex/models` (cached 5 minutes, ETag-aware) so it always matches what your account can actually serve. Cursor models are fetched from Cursor's internal AvailableModels endpoint when possible, with a small fallback list. The table below combines the currently advertised Anthropic models, representative Codex models, and Cursor fallback examples:
 
 | Model ID                                             | Provider  | Description                                        |
 | ---------------------------------------------------- | --------- | -------------------------------------------------- |
@@ -357,7 +357,7 @@ Reload semantics are **upsert only**: new token files on disk are added to the i
 
 ### Call statistics: `/admin/stats`
 
-Every client request that passes client API-key auth is appended as a single line to `<auth-dir>/stats.jsonl` and added to an in-memory aggregate. On startup the aggregate is rebuilt by replaying the JSONL, so the snapshot survives restarts.
+Every request that passes client or admin API-key auth is appended as a single line to `<auth-dir>/stats.jsonl` and added to an in-memory aggregate. On startup the aggregate is rebuilt by replaying the JSONL, so the snapshot survives restarts.
 
 `GET /admin/stats` returns three independent aggregate views plus a global `totals`:
 
