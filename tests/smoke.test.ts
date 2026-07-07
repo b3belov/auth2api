@@ -1424,6 +1424,79 @@ test("codex responses upstream errors are normalized to OpenAI error shape", asy
   });
 });
 
+test("codex retries another account when one account cannot serve the requested model", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "free-at",
+      refreshToken: "free-rt",
+      email: "free@example.com",
+      accountUuid: "free-account-id",
+      provider: "codex",
+    }),
+  );
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "pro-at",
+      refreshToken: "pro-rt",
+      email: "pro@example.com",
+      accountUuid: "pro-account-id",
+      provider: "codex",
+    }),
+  );
+
+  const seenAuthorizations: string[] = [];
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    const headers = init?.headers as Record<string, string>;
+    seenAuthorizations.push(headers.Authorization);
+
+    if (seenAuthorizations.length === 1) {
+      assert.equal(headers.Authorization, "Bearer free-at");
+      return new Response(
+        JSON.stringify({ detail: "model not supported for this account" }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    assert.equal(headers.Authorization, "Bearer pro-at");
+    return new Response(codexResponsesSseBody(["ok"]), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const result = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.body.choices[0].message.content, "ok");
+  assert.deepEqual(seenAuthorizations, ["Bearer free-at", "Bearer pro-at"]);
+});
+
 test("cursor responses proxy converts minimal Connect-RPC stream to Responses SSE", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(

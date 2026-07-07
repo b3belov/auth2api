@@ -43,6 +43,24 @@ function sendResponsesTranslationError(
   return true;
 }
 
+function codexAccountScopedError(
+  status: number,
+  body: string,
+): "forbidden" | null {
+  if (status !== 400 && status !== 403) return null;
+  const text = body.toLowerCase();
+  if (
+    text.includes("model not supported") ||
+    text.includes("not available for this account") ||
+    text.includes("requires chatgpt plus") ||
+    text.includes("requires chatgpt pro") ||
+    text.includes("upgrade")
+  ) {
+    return "forbidden";
+  }
+  return null;
+}
+
 /**
  * Codex-specific path for /v1/messages. Translates the Anthropic Messages
  * request into a Responses request, applies codex's required defaults
@@ -178,6 +196,7 @@ async function proxyCodexMessages(args: {
       tagStatsUsage(resp, codexMsgUsage);
       resp.json(anthropicJson);
     },
+    classifyAccountScopedError: codexAccountScopedError,
   });
 }
 

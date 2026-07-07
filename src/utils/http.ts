@@ -93,6 +93,10 @@ export interface ProxyOptions {
    * client hitting Anthropic upstream) so we don't leak provider-shaped errors.
    */
   errorAdapter?: (status: number, body: string) => any;
+  classifyAccountScopedError?: (
+    status: number,
+    body: string,
+  ) => AccountFailureKind | null;
   maxRetries?: number;
 }
 
@@ -139,7 +143,11 @@ export async function proxyWithRetry(
   resp.on("close", abortRequest);
 
   try {
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
+    for (
+      let attempt = 0;
+      attempt < Math.max(maxRetries, manager.accountCount);
+      attempt++
+    ) {
       const result = manager.getNextAccount();
       if (!result.account) {
         return accountUnavailable(resp, result, manager.provider);
@@ -222,6 +230,19 @@ export async function proxyWithRetry(
         }
       } catch {
         /* ignore */
+      }
+
+      const accountScopedFailure =
+        options.classifyAccountScopedError?.(lastStatus, lastErrBody) ?? null;
+      if (accountScopedFailure) {
+        manager.recordFailure(
+          account.token.email,
+          accountScopedFailure,
+          lastErrBody.slice(0, 500),
+        );
+        if (attempt < Math.max(maxRetries, manager.accountCount) - 1) {
+          continue;
+        }
       }
 
       if (lastStatus === 401) {
