@@ -204,6 +204,46 @@ async function requestText(options: {
   });
 }
 
+async function requestRaw(options: {
+  server: http.Server;
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  body?: string;
+}): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+  const address = serverAddress(options.server);
+
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: address.port,
+        method: options.method,
+        path: options.path,
+        headers: options.headers || {},
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode || 0,
+            body: data,
+            headers: res.headers,
+          });
+        });
+      },
+    );
+
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
+    req.end();
+  });
+}
+
 function serverAddress(server: http.Server): AddressInfo {
   const address = server.address();
   if (!address || typeof address === "string") {
@@ -1119,6 +1159,70 @@ test("admin routes reject client-only keys when admin-api-keys are distinct", as
   });
 
   assert.equal(resp.status, 403);
+});
+
+test("admin routes require admin-api-key, not client api-key", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    {
+      ...makeConfig(authDir),
+      "api-keys": new Set(["sk-client"]),
+      "admin-api-keys": new Set(["sk-admin"]),
+    },
+    manager,
+  );
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const clientKey = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { Authorization: "Bearer sk-client" },
+  });
+  assert.equal(clientKey.status, 403);
+
+  const adminKey = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { Authorization: "Bearer sk-admin" },
+  });
+  assert.equal(adminKey.status, 200);
+});
+
+test("protected routes reject missing auth before parsing oversized JSON", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    {
+      ...makeConfig(authDir),
+      "body-limit": "1kb",
+    },
+    manager,
+  );
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const hugeBody = JSON.stringify({ input: "x".repeat(4096) });
+  const result = await requestRaw({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(hugeBody).toString(),
+    },
+    body: hugeBody,
+  });
+
+  assert.equal(result.status, 401);
+  assert.match(result.body, /Missing API key/);
 });
 
 test("count_tokens with empty body returns upstream client error, not network error", async (t) => {

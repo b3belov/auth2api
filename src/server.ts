@@ -1,7 +1,7 @@
 import express from "express";
 import { Config, isDebugLevel } from "./config";
 import { ProviderRegistry } from "./providers/registry";
-import { extractApiKey, hashApiKey } from "./utils/common";
+import { extractApiKey, hashApiKey, hasTimingSafeApiKey } from "./utils/common";
 import {
   createChatCompletionsHandler,
   createResponsesCompactHandler,
@@ -48,8 +48,6 @@ export function createServer(
 ): express.Application {
   const app = express();
 
-  app.use(express.json({ limit: config["body-limit"] }));
-
   if (isDebugLevel(config.debug, "verbose")) {
     app.use((req, res, next) => {
       const startedAt = Date.now();
@@ -82,8 +80,9 @@ export function createServer(
     next();
   });
 
-  // Rate limiting middleware
-  app.use("/v1", (req, res, next) => {
+  const protectedRoutes = ["/v1", "/codex", "/backend-api/codex", "/admin"];
+
+  app.use(protectedRoutes, (req, res, next) => {
     const ip = req.ip || req.socket.remoteAddress || "unknown";
     if (!rateLimit(ip)) {
       res.status(429).json({ error: { message: "Too many requests" } });
@@ -92,20 +91,20 @@ export function createServer(
     next();
   });
 
-  function requireConfiguredKey(
+  const requireApiKeyFor = (
     allowedKeys: Set<string>,
-    missingMessage: string,
-    invalidMessage: string,
-  ): express.RequestHandler {
+    label: "client" | "admin",
+  ): express.RequestHandler => {
     return (req, res, next) => {
       const key = extractApiKey(req.headers);
       if (!key) {
-        res.status(401).json({ error: { message: missingMessage } });
+        res.status(401).json({ error: { message: "Missing API key" } });
         return;
       }
-      const valid = allowedKeys.has(key);
-      if (!valid) {
-        res.status(403).json({ error: { message: invalidMessage } });
+      if (!hasTimingSafeApiKey(key, allowedKeys)) {
+        res
+          .status(403)
+          .json({ error: { message: `Invalid ${label} API key` } });
         return;
       }
       // Seed res.locals.stats so the stats-finish middleware can record this
@@ -129,20 +128,14 @@ export function createServer(
       }
       next();
     };
-  }
+  };
 
   // API key auth middleware — accepts both OpenAI style (Authorization: Bearer)
   // and Anthropic style (x-api-key), so Claude Code and OpenAI clients both work
-  const requireApiKey = requireConfiguredKey(
-    config["api-keys"],
-    "Missing API key",
-    "Invalid API key",
-  );
-
-  const requireAdminApiKey = requireConfiguredKey(
+  const requireClientApiKey = requireApiKeyFor(config["api-keys"], "client");
+  const requireAdminApiKey = requireApiKeyFor(
     config["admin-api-keys"],
-    "Missing admin API key",
-    "Invalid admin API key",
+    "admin",
   );
 
   // Record one stats event per request that made it past auth. `finish`
@@ -211,7 +204,12 @@ export function createServer(
   });
 
   app.use("/admin", requireAdminApiKey);
+  app.use(["/v1", "/codex", "/backend-api/codex"], requireClientApiKey);
+
   app.use("/admin", statsFinishMiddleware);
+  app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
+
+  app.use(protectedRoutes, express.json({ limit: config["body-limit"] }));
 
   // GET /admin/stats — three-axis aggregated call statistics.
   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
@@ -264,9 +262,6 @@ export function createServer(
       generated_at: new Date().toISOString(),
     });
   });
-
-  app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
-  app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
   app.get("/v1/models", async (_req, res) => {
     const created = Math.floor(Date.now() / 1000);
     const providers = registry.withAccounts();

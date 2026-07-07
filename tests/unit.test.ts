@@ -5,7 +5,12 @@ import path from "node:path";
 import fs from "node:fs";
 import { EventEmitter } from "node:events";
 
-import { extractApiKey, hashApiKey, timeout } from "../src/utils/common";
+import {
+  extractApiKey,
+  hashApiKey,
+  hasTimingSafeApiKey,
+  timeout,
+} from "../src/utils/common";
 import { combineAbortSignals } from "../src/utils/abort";
 import { classifyFailure, proxyWithRetry } from "../src/utils/http";
 import { handleStreamingResponse } from "../src/upstream/streaming";
@@ -70,6 +75,14 @@ test("hashApiKey returns consistent sha256 hex", () => {
 
 test("hashApiKey returns different hashes for different keys", () => {
   assert.notEqual(hashApiKey("key-a"), hashApiKey("key-b"));
+});
+
+test("hasTimingSafeApiKey validates exact configured keys", () => {
+  const allowed = new Set(["sk-one", "sk-two"]);
+  assert.equal(hasTimingSafeApiKey("sk-one", allowed), true);
+  assert.equal(hasTimingSafeApiKey("sk-two", allowed), true);
+  assert.equal(hasTimingSafeApiKey("sk-three", allowed), false);
+  assert.equal(hasTimingSafeApiKey("", allowed), false);
 });
 
 test("timeout resolves after delay", async () => {
