@@ -1,3 +1,4 @@
+import http from "http";
 import crypto from "crypto";
 import readline from "readline";
 import { Config, loadConfig, resolveAuthDir } from "./config";
@@ -142,10 +143,10 @@ async function doLogin(
   await notifyServerReload(config);
 }
 
-async function startServer(): Promise<void> {
-  const configPath = process.argv
-    .find((a) => a.startsWith("--config="))
-    ?.split("=")[1];
+export async function startServer(
+  args = process.argv.slice(2),
+): Promise<http.Server> {
+  const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
   const config = loadConfig(configPath);
   const authDir = resolveAuthDir(config["auth-dir"]);
 
@@ -157,9 +158,8 @@ async function startServer(): Promise<void> {
     .reduce((sum, p) => sum + p.manager.accountCount, 0);
   if (totalAccounts === 0) {
     console.log(
-      "No accounts found. Run with --login (and optionally --provider=codex) to add an account first.",
+      "No accounts found. Start a browser login at /v1/claude-auth or /v1/codex-auth, or run with --login.",
     );
-    process.exit(1);
   }
 
   for (const p of registry.all()) {
@@ -179,20 +179,36 @@ async function startServer(): Promise<void> {
   const host = config.host || "127.0.0.1";
   const port = config.port;
 
-  app.listen(port, host, () => {
-    console.log(`auth2api running on http://${host}:${port}`);
-    console.log(`Endpoints:`);
-    console.log(`  POST /v1/chat/completions`);
-    console.log(`  POST /v1/responses`);
-    console.log(`  POST /v1/messages`);
-    console.log(`  POST /v1/messages/count_tokens`);
-    console.log(`  GET  /v1/models`);
-    console.log(`  GET  /admin/accounts`);
-    if (statsRecorder) console.log(`  GET  /admin/stats`);
-    console.log(`  GET  /health`);
+  const server = app.listen(port, host);
+
+  await new Promise<void>((resolve, reject) => {
+    const onListening = () => {
+      server.off("error", onError);
+      resolve();
+    };
+    const onError = (err: Error) => {
+      server.off("listening", onListening);
+      reject(err);
+    };
+
+    server.once("listening", onListening);
+    server.once("error", onError);
   });
 
-  process.on("SIGINT", () => {
+  console.log(`auth2api running on http://${host}:${port}`);
+  console.log(`Endpoints:`);
+  console.log(`  POST /v1/chat/completions`);
+  console.log(`  POST /v1/responses`);
+  console.log(`  POST /v1/messages`);
+  console.log(`  POST /v1/messages/count_tokens`);
+  console.log(`  GET  /v1/models`);
+  console.log(`  GET  /v1/claude-auth`);
+  console.log(`  GET  /v1/codex-auth`);
+  console.log(`  GET  /admin/accounts`);
+  if (statsRecorder) console.log(`  GET  /admin/stats`);
+  console.log(`  GET  /health`);
+
+  const handleSigint = () => {
     for (const p of registry.all()) {
       p.manager.stopAutoRefresh();
       p.manager.stopStatsLogger();
@@ -204,7 +220,14 @@ async function startServer(): Promise<void> {
       return;
     }
     process.exit(0);
+  };
+
+  process.on("SIGINT", handleSigint);
+  server.once("close", () => {
+    process.off("SIGINT", handleSigint);
   });
+
+  return server;
 }
 
 async function main(): Promise<void> {
@@ -231,11 +254,13 @@ async function main(): Promise<void> {
       await doLogin(config, registry, providerId, manual);
     }
   } else {
-    await startServer();
+    await startServer(args);
   }
 }
 
-main().catch((err) => {
-  console.error("Fatal:", err.message);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error("Fatal:", err.message);
+    process.exit(1);
+  });
+}

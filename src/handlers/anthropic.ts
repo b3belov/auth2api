@@ -275,10 +275,7 @@ export function createMessagesHandler(
       // JSON is a separate adapter we haven't written yet.
       const stream = provider.id === "cursor" ? true : !!body.stream;
       const upstreamBody = { ...body };
-      applyAnthropicReasoningDefault(
-        upstreamBody,
-        config.reasoning?.anthropic,
-      );
+      applyAnthropicReasoningDefault(upstreamBody, config.reasoning?.anthropic);
 
       await proxyWithRetry("Messages", resp, config, {
         manager: provider.manager,

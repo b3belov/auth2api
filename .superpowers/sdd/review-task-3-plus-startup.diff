@@ -1,0 +1,388 @@
+# Review package: 95de88c13c4801902ea8392d5b412750c0fc05aa..HEAD
+
+## Commits
+0ac282d fix(server): allow first-run auth startup
+34dc93c feat(server): register browser auth routes
+
+## Files changed
+ .superpowers/sdd/task-3-report.md | 79 +++++++++++++++++++++++++++++++++++++++
+ .superpowers/sdd/task-4-report.md | 53 ++++++++++++++++++++++++++
+ src/index.ts                      | 30 +++++++++------
+ src/server.ts                     | 27 +++++++++++++
+ 4 files changed, 177 insertions(+), 12 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/task-3-report.md b/.superpowers/sdd/task-3-report.md
+new file mode 100644
+index 0000000..e104382
+--- /dev/null
++++ b/.superpowers/sdd/task-3-report.md
+@@ -0,0 +1,79 @@
++# Task 3 Report: Register the Browser Auth Routes
++
++## Scope
++
++- Modified `src/server.ts` only for production code, per task brief.
++- Added this report file under `.superpowers/sdd/`.
++
++## What changed
++
++1. Imported `createBrowserOAuthHandler` from `src/auth/browser-oauth.ts`.
++2. Added a local `startProviderRuntime()` helper inside `createServer()` to start refresh/stats runtime for `anthropic` and `codex` providers once an account exists.
++3. Registered exactly these browser-auth routes before the `/v1` API-key middleware:
++   - `GET /v1/claude-auth` -> provider id `anthropic`, display name `Claude`
++   - `GET /v1/codex-auth` -> provider id `codex`, display name `Codex`
++4. Did not add `/v1/anthropic-auth`.
++
++## Route ordering
++
++The two public browser-auth endpoints were inserted immediately before:
++
++```ts
++app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
++```
++
++That keeps them reachable without API-key auth while leaving the rest of `/v1` protected.
++
++## Loopback / browser behavior
++
++`src/auth/browser-oauth.ts` already enforces loopback-only access via `isLoopbackRequest()` and returns browser-friendly HTML responses for success/failure. No extra server-side route aliasing or special response handling was added in `src/server.ts`.
++
++## Verification
++
++### 1. Forbidden alias check
++
++Command:
++
++```bash
++rg -n "anthropic-auth" src tests README.md
++```
++
++Result:
++
++- No matches in tracked implementation/docs/tests.
++- Exit code `1`, which is expected for "no matches".
++
++### 2. Build
++
++Command:
++
++```bash
++npm run build
++```
++
++Result:
++
++- Passed (`tsc` completed successfully).
++
++### 3. Diff hygiene
++
++Command:
++
++```bash
++git diff --check
++```
++
++Result:
++
++- No whitespace or patch formatting issues.
++
++## Self-review
++
++- Confirmed the change is scoped to `src/server.ts` and does not touch unrelated code.
++- Confirmed the new public routes are registered before API-key middleware.
++- Confirmed only `/v1/claude-auth` and `/v1/codex-auth` were added.
++- Confirmed no `/v1/anthropic-auth` alias was introduced.
++
++## Notes
++
++- I did not add tests in this task because the brief scoped implementation to `src/server.ts` and required verification was `npm run build` plus the `rg` route check.
+diff --git a/.superpowers/sdd/task-4-report.md b/.superpowers/sdd/task-4-report.md
+new file mode 100644
+index 0000000..9908aa0
+--- /dev/null
++++ b/.superpowers/sdd/task-4-report.md
+@@ -0,0 +1,53 @@
++# Task 4 Report: Allow First-Run Server Startup
++
++## Scope
++
++- Modified only `/Users/dmytro/.codex/worktrees/cd2a/auth2api/src/index.ts`, as requested.
++- Added this report at `/Users/dmytro/.codex/worktrees/cd2a/auth2api/.superpowers/sdd/task-4-report.md`.
++
++## Requirements Covered
++
++1. Export `startServer(args?)` returning `http.Server`
++   - Added `import http from "http";`.
++   - Changed `startServer` to:
++     - `export async function startServer(args = process.argv.slice(2)): Promise<http.Server>`
++   - Switched config parsing inside `startServer` to use injected `args`.
++
++2. Allow first-run startup with zero accounts
++   - Removed the zero-account `process.exit(1)` path.
++   - Replaced the message with:
++     - `No accounts found. Start a browser login at /v1/claude-auth or /v1/codex-auth, or run with --login.`
++   - Existing auto-refresh and stats startup logic remains unchanged for loaded accounts and enabled stats.
++
++3. Return the listening server
++   - Captured `app.listen(...)` into `const server`.
++   - Returned `server` after the `SIGINT` handler setup.
++
++4. Print new browser-auth startup routes
++   - Added startup route logs for:
++     - `GET  /v1/claude-auth`
++     - `GET  /v1/codex-auth`
++
++5. Keep CLI behavior compatible
++   - `main()` still handles `--login`, `--manual`, `--provider=...`, and cursor-specific flags exactly in the CLI path.
++   - Updated the non-login branch to call `await startServer(args)` so CLI argument handling remains consistent.
++
++6. Guard CLI execution on import
++   - Wrapped `main().catch(...)` in `if (require.main === module) { ... }`.
++   - This prevents process startup when `src/index.ts` is imported by Task 5 tests.
++
++## Verification
++
++- Ran `npm run build`
++- Result: passed (`tsc` exited successfully)
++
++## Self-Review
++
++- Kept the edit limited to `src/index.ts`.
++- Did not change login flow internals beyond passing parsed CLI args through to `startServer`.
++- Did not add tests because the task brief explicitly says startServer import tests come in Task 5 and only requires `npm run build` for Task 4.
++
++## Concerns
++
++- No functional concerns from this task scope.
++- Runtime validation of the new first-run browser-auth path is deferred to later task coverage; this task verified compile/build only per brief.
+diff --git a/src/index.ts b/src/index.ts
+index be49146..69d1638 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,10 +1,11 @@
++import http from "http";
+ import crypto from "crypto";
+ import readline from "readline";
+ import { Config, loadConfig, resolveAuthDir } from "./config";
+ import { ProviderId } from "./auth/types";
+ import { generatePKCECodes } from "./auth/pkce";
+ import { waitForCallback } from "./auth/callback-server";
+ import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
+ import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
+ import { buildRegistry, ProviderRegistry } from "./providers/registry";
+ import { createServer } from "./server";
+@@ -135,83 +136,86 @@ async function doLogin(
+     state,
+     pkce,
+   );
+   if (!tokenData.provider) tokenData.provider = provider.id;
+   provider.manager.addAccount(tokenData);
+   console.log(`\nLogin successful! Account: ${tokenData.email}`);
+   console.log(`Token expires: ${tokenData.expiresAt}`);
+   await notifyServerReload(config);
+ }
+ 
+-async function startServer(): Promise<void> {
+-  const configPath = process.argv
+-    .find((a) => a.startsWith("--config="))
+-    ?.split("=")[1];
++export async function startServer(
++  args = process.argv.slice(2),
++): Promise<http.Server> {
++  const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
+   const config = loadConfig(configPath);
+   const authDir = resolveAuthDir(config["auth-dir"]);
+ 
+   const registry = buildRegistry(authDir);
+   for (const p of registry.all()) p.manager.load();
+ 
+   const totalAccounts = registry
+     .all()
+     .reduce((sum, p) => sum + p.manager.accountCount, 0);
+   if (totalAccounts === 0) {
+     console.log(
+-      "No accounts found. Run with --login (and optionally --provider=codex) to add an account first.",
++      "No accounts found. Start a browser login at /v1/claude-auth or /v1/codex-auth, or run with --login.",
+     );
+-    process.exit(1);
+   }
+ 
+   for (const p of registry.all()) {
+     if (p.manager.accountCount > 0) {
+       p.manager.startAutoRefresh();
+       p.manager.startStatsLogger();
+     }
+   }
+ 
+   let statsRecorder: StatsRecorder | undefined;
+   if (config.stats.enabled) {
+     statsRecorder = new StatsRecorder();
+     statsRecorder.start(authDir);
+   }
+ 
+   const app = createServer(config, registry, statsRecorder);
+   const host = config.host || "127.0.0.1";
+   const port = config.port;
+ 
+-  app.listen(port, host, () => {
++  const server = app.listen(port, host, () => {
+     console.log(`auth2api running on http://${host}:${port}`);
+     console.log(`Endpoints:`);
+     console.log(`  POST /v1/chat/completions`);
+     console.log(`  POST /v1/responses`);
+     console.log(`  POST /v1/messages`);
+     console.log(`  POST /v1/messages/count_tokens`);
+     console.log(`  GET  /v1/models`);
++    console.log(`  GET  /v1/claude-auth`);
++    console.log(`  GET  /v1/codex-auth`);
+     console.log(`  GET  /admin/accounts`);
+     if (statsRecorder) console.log(`  GET  /admin/stats`);
+     console.log(`  GET  /health`);
+   });
+ 
+   process.on("SIGINT", () => {
+     for (const p of registry.all()) {
+       p.manager.stopAutoRefresh();
+       p.manager.stopStatsLogger();
+     }
+     if (statsRecorder) {
+       // Best-effort flush — exit even if close hangs so SIGINT stays responsive.
+       statsRecorder.stop().finally(() => process.exit(0));
+       setTimeout(() => process.exit(0), 1000).unref();
+       return;
+     }
+     process.exit(0);
+   });
++
++  return server;
+ }
+ 
+ async function main(): Promise<void> {
+   const args = process.argv.slice(2);
+   const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
+   const config = loadConfig(configPath);
+   const authDir = resolveAuthDir(config["auth-dir"]);
+ 
+   if (args.includes("--login")) {
+     const manual = args.includes("--manual");
+@@ -224,18 +228,20 @@ async function main(): Promise<void> {
+     if (providerId === "cursor") {
+       if (cursorStorage || args.includes("--cursor-import-local")) {
+         await importCursorLogin(config, registry, cursorStorage);
+       } else {
+         await browserCursorLogin(config, registry);
+       }
+     } else {
+       await doLogin(config, registry, providerId, manual);
+     }
+   } else {
+-    await startServer();
++    await startServer(args);
+   }
+ }
+ 
+-main().catch((err) => {
+-  console.error("Fatal:", err.message);
+-  process.exit(1);
+-});
++if (require.main === module) {
++  main().catch((err) => {
++    console.error("Fatal:", err.message);
++    process.exit(1);
++  });
++}
+diff --git a/src/server.ts b/src/server.ts
+index 8ab8bb4..3e1f61a 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -5,20 +5,21 @@ import { extractApiKey, hashApiKey } from "./utils/common";
+ import {
+   createChatCompletionsHandler,
+   createResponsesCompactHandler,
+   createResponsesHandler,
+ } from "./handlers/openai";
+ import {
+   createMessagesHandler,
+   createCountTokensHandler,
+ } from "./handlers/anthropic";
+ import { StatsRecorder } from "./stats/recorder";
++import { createBrowserOAuthHandler } from "./auth/browser-oauth";
+ 
+ // Simple in-memory rate limiter per IP
+ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+ const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+ const RATE_LIMIT_MAX = 60;
+ 
+ function rateLimit(ip: string): boolean {
+   const now = Date.now();
+   const entry = rateLimitMap.get(ip);
+   if (!entry || now > entry.resetAt) {
+@@ -180,20 +181,28 @@ export function createServer(
+         recordStats({
+           status: "failure",
+           statusCode: 499,
+           failureKind: "client_disconnect",
+         });
+       }
+     });
+     next();
+   };
+ 
++  const startProviderRuntime = (providerId: "anthropic" | "codex") => {
++    const provider = registry.get(providerId);
++    if (provider.manager.accountCount > 0) {
++      provider.manager.startAutoRefresh();
++      provider.manager.startStatsLogger();
++    }
++  };
++
+   // Health check (no account count to avoid info leak)
+   app.get("/health", (_req, res) => {
+     res.json({ status: "ok" });
+   });
+ 
+   app.use("/admin", requireApiKey);
+   app.use("/admin", statsFinishMiddleware);
+ 
+   // GET /admin/stats — three-axis aggregated call statistics.
+   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
+@@ -240,20 +249,38 @@ export function createServer(
+       } catch (err: any) {
+         reloaded[p.id] = { error: err?.message || String(err) };
+       }
+     }
+     res.json({
+       reloaded,
+       generated_at: new Date().toISOString(),
+     });
+   });
+ 
++  app.get(
++    "/v1/claude-auth",
++    createBrowserOAuthHandler({
++      provider: registry.get("anthropic"),
++      displayName: "Claude",
++      onAccountAdded: () => startProviderRuntime("anthropic"),
++    }),
++  );
++
++  app.get(
++    "/v1/codex-auth",
++    createBrowserOAuthHandler({
++      provider: registry.get("codex"),
++      displayName: "Codex",
++      onAccountAdded: () => startProviderRuntime("codex"),
++    }),
++  );
++
+   app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
+   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
+   app.get("/v1/models", async (_req, res) => {
+     const created = Math.floor(Date.now() / 1000);
+     const providers = registry.withAccounts();
+     const lists = await Promise.all(providers.map((p) => p.listModels()));
+     const data = lists.flatMap((models) =>
+       models.map((m) => ({
+         id: m.id,
+         object: "model",

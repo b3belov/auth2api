@@ -873,7 +873,8 @@ export function createResponsesCompactHandler(
 
           const codexCompactUsage = {
             inputTokens: usage?.input_tokens || streamUsage?.inputTokens || 0,
-            outputTokens: usage?.output_tokens || streamUsage?.outputTokens || 0,
+            outputTokens:
+              usage?.output_tokens || streamUsage?.outputTokens || 0,
             cacheCreationInputTokens: 0,
             cacheReadInputTokens:
               usage?.input_tokens_details?.cached_tokens ||

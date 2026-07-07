@@ -1,10 +1,7 @@
 import { TokenData } from "../types";
 import { decodeJwtPayload } from "../../utils/jwt";
 import { RefreshTokenExhaustedError } from "../refresh-errors";
-import {
-  CURSOR_CLIENT_ID,
-  DEFAULT_CURSOR_CLIENT_VERSION,
-} from "./storage";
+import { CURSOR_CLIENT_ID, DEFAULT_CURSOR_CLIENT_VERSION } from "./storage";
 
 const TOKEN_URL = "https://api2.cursor.sh/oauth/token";
 
@@ -74,7 +71,9 @@ export async function refreshCursorTokens(
 
   const data = (await resp.json()) as CursorRefreshResponse;
   if (data.shouldLogout || !data.access_token) {
-    throw new Error("Cursor refresh token is no longer valid; re-login in Cursor");
+    throw new Error(
+      "Cursor refresh token is no longer valid; re-login in Cursor",
+    );
   }
 
   return {

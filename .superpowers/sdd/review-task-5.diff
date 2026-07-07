@@ -1,0 +1,807 @@
+# Review package: 0ac282d2be6de5656afed8cfb528db8623d1a299..HEAD
+
+## Commits
+ddc9858 test(auth): add browser OAuth coverage
+
+## Files changed
+ .superpowers/sdd/task-5-report.md | 113 +++++++++
+ src/index.ts                      |  38 +--
+ tests/browser-oauth.test.ts       | 485 ++++++++++++++++++++++++++++++++++++++
+ tests/unit.test.ts                |   9 +-
+ 4 files changed, 629 insertions(+), 16 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/task-5-report.md b/.superpowers/sdd/task-5-report.md
+new file mode 100644
+index 0000000..f411461
+--- /dev/null
++++ b/.superpowers/sdd/task-5-report.md
+@@ -0,0 +1,113 @@
++# Task 5 Report: Browser OAuth Tests
++
++## Scope completed
++
++- Added `tests/browser-oauth.test.ts` covering the browser OAuth routes and callback flow for Anthropic and Codex.
++- Added regression coverage for:
++  - loopback-only request detection
++  - `AccountManager` timer idempotency
++  - `/v1/claude-auth` and `/v1/codex-auth` redirect behavior without API keys
++  - successful callback token persistence and live manager updates
++  - state mismatch rejection with no token persistence
++  - duplicate in-flight login rejection
++  - absence of `/v1/anthropic-auth`
++  - `/v1/models` auth behavior when zero accounts are loaded
++  - `startServer()` booting successfully with zero accounts
++
++## TDD notes
++
++1. Wrote `tests/browser-oauth.test.ts` from the task brief.
++2. Initial sandboxed `npm run test -- tests/browser-oauth.test.ts` failed with the known `tsx` IPC `EPERM` issue:
++   - `listen EPERM ... /var/folders/.../tsx-501/...pipe`
++3. Re-ran the tests unsandboxed to get real red-state evidence.
++4. Red-state findings:
++   - browser OAuth callback tests were colliding because the test HTTP clients were leaving callback connections open long enough to keep the module-level in-flight state around between cases
++   - `startServer()` resolved before the server was actually listening, so `server.address()` could still be unset
++   - existing stats tests in `tests/unit.test.ts` were still constructing `createServer()` with a stub registry that no longer satisfied the route registration contract after browser OAuth endpoints were added
++
++## Code changes
++
++### 1. Added browser OAuth integration tests
++
++File: `tests/browser-oauth.test.ts`
++
++- Added shared helpers for:
++  - config construction
++  - ephemeral app startup/shutdown
++  - HTTP requests against the in-process app server
++  - one-shot callback requests
++  - provider exchange stubbing
++- Forced `Connection: close` on test HTTP clients and added a short cleanup wait after callback completion/cancellation so callback listeners fully unwind between tests.
++
++### 2. Fixed `startServer()` readiness semantics
++
++File: `src/index.ts`
++
++- Changed `startServer()` to await the underlying HTTP server `listening` event before resolving.
++- This makes the exported `startServer(args?)` contract deterministic for tests and callers using ephemeral port `0`.
++
++### 3. Fixed repeated `startServer()` SIGINT listener accumulation
++
++File: `src/index.ts`
++
++- Added a named `SIGINT` handler and remove it on `server.close()`.
++- This addresses the known reviewer minor mentioned in the task brief and keeps repeated `startServer()` calls from leaking process listeners.
++
++### 4. Updated existing stats tests to use a real registry
++
++File: `tests/unit.test.ts`
++
++- Replaced the old `{} as any` registry stub with `buildRegistry(tmp)` plus `manager.load()` calls in the two `createServer()` stats tests.
++- This keeps those tests aligned with current route registration requirements without widening their scope.
++
++## Verification
++
++### Focused browser OAuth tests
++
++Command:
++
++```bash
++./node_modules/.bin/tsx --test tests/browser-oauth.test.ts
++```
++
++Result:
++
++- 11 tests passed
++- 0 failed
++
++### Build
++
++Command:
++
++```bash
++npm run build
++```
++
++Result:
++
++- succeeded
++
++### Full suite
++
++Command:
++
++```bash
++npm run test
++```
++
++Result:
++
++- 226 tests passed
++- 0 failed
++
++## Minimal implementation fixes made
++
++- `src/index.ts`: await server listen before resolving `startServer()`
++- `src/index.ts`: remove per-server `SIGINT` handler on close
++
++No other production behavior was changed.
++
++## Concerns
++
++- The sandboxed `npm run test -- ...` path still hits the known `tsx` IPC permission error, so test verification required unsandboxed execution.
++- The browser OAuth tests intentionally drive real localhost callback listeners, so they depend on callback ports `54545` and `1455` being available on the test machine.
+diff --git a/src/index.ts b/src/index.ts
+index 69d1638..af19ff5 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -172,47 +172,57 @@ export async function startServer(
+   let statsRecorder: StatsRecorder | undefined;
+   if (config.stats.enabled) {
+     statsRecorder = new StatsRecorder();
+     statsRecorder.start(authDir);
+   }
+ 
+   const app = createServer(config, registry, statsRecorder);
+   const host = config.host || "127.0.0.1";
+   const port = config.port;
+ 
+-  const server = app.listen(port, host, () => {
+-    console.log(`auth2api running on http://${host}:${port}`);
+-    console.log(`Endpoints:`);
+-    console.log(`  POST /v1/chat/completions`);
+-    console.log(`  POST /v1/responses`);
+-    console.log(`  POST /v1/messages`);
+-    console.log(`  POST /v1/messages/count_tokens`);
+-    console.log(`  GET  /v1/models`);
+-    console.log(`  GET  /v1/claude-auth`);
+-    console.log(`  GET  /v1/codex-auth`);
+-    console.log(`  GET  /admin/accounts`);
+-    if (statsRecorder) console.log(`  GET  /admin/stats`);
+-    console.log(`  GET  /health`);
++  const server = app.listen(port, host);
++
++  await new Promise<void>((resolve, reject) => {
++    server.once("listening", resolve);
++    server.once("error", reject);
+   });
+ 
+-  process.on("SIGINT", () => {
++  console.log(`auth2api running on http://${host}:${port}`);
++  console.log(`Endpoints:`);
++  console.log(`  POST /v1/chat/completions`);
++  console.log(`  POST /v1/responses`);
++  console.log(`  POST /v1/messages`);
++  console.log(`  POST /v1/messages/count_tokens`);
++  console.log(`  GET  /v1/models`);
++  console.log(`  GET  /v1/claude-auth`);
++  console.log(`  GET  /v1/codex-auth`);
++  console.log(`  GET  /admin/accounts`);
++  if (statsRecorder) console.log(`  GET  /admin/stats`);
++  console.log(`  GET  /health`);
++
++  const handleSigint = () => {
+     for (const p of registry.all()) {
+       p.manager.stopAutoRefresh();
+       p.manager.stopStatsLogger();
+     }
+     if (statsRecorder) {
+       // Best-effort flush — exit even if close hangs so SIGINT stays responsive.
+       statsRecorder.stop().finally(() => process.exit(0));
+       setTimeout(() => process.exit(0), 1000).unref();
+       return;
+     }
+     process.exit(0);
++  };
++
++  process.on("SIGINT", handleSigint);
++  server.once("close", () => {
++    process.off("SIGINT", handleSigint);
+   });
+ 
+   return server;
+ }
+ 
+ async function main(): Promise<void> {
+   const args = process.argv.slice(2);
+   const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
+   const config = loadConfig(configPath);
+   const authDir = resolveAuthDir(config["auth-dir"]);
+diff --git a/tests/browser-oauth.test.ts b/tests/browser-oauth.test.ts
+new file mode 100644
+index 0000000..9148146
+--- /dev/null
++++ b/tests/browser-oauth.test.ts
+@@ -0,0 +1,485 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import http, { createServer as createHttpServer } from "node:http";
++import os from "node:os";
++import path from "node:path";
++import fs from "node:fs";
++import { AddressInfo } from "node:net";
++
++import { Config } from "../src/config";
++import { isLoopbackRequest } from "../src/auth/browser-oauth";
++import { AccountManager } from "../src/accounts/manager";
++import { createServer } from "../src/server";
++import { startServer } from "../src/index";
++import { buildRegistry, ProviderRegistry } from "../src/providers/registry";
++import { loadAllTokens } from "../src/auth/token-storage";
++import { TokenData } from "../src/auth/types";
++
++function makeConfig(authDir: string): Config {
++  return {
++    host: "127.0.0.1",
++    port: 0,
++    "auth-dir": authDir,
++    "api-keys": new Set(["test-key"]),
++    "body-limit": "200mb",
++    cloaking: {
++      "cli-version": "2.1.88",
++      entrypoint: "cli",
++    },
++    timeouts: {
++      "messages-ms": 120000,
++      "stream-messages-ms": 600000,
++      "count-tokens-ms": 30000,
++    },
++    stats: { enabled: false },
++    reasoning: {},
++    debug: "off",
++  };
++}
++
++async function startApp(config: Config): Promise<{
++  server: http.Server;
++  registry: ProviderRegistry;
++}> {
++  const registry = buildRegistry(config["auth-dir"]);
++  for (const provider of registry.all()) provider.manager.load();
++  const app = createServer(config, registry);
++  const server = createHttpServer(app);
++  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
++  return { server, registry };
++}
++
++async function stopApp(server: http.Server): Promise<void> {
++  await new Promise<void>((resolve, reject) => {
++    server.close((err) => {
++      if (err) reject(err);
++      else resolve();
++    });
++  });
++}
++
++function serverAddress(server: http.Server): AddressInfo {
++  const address = server.address();
++  if (!address || typeof address === "string") {
++    throw new Error("Server is not listening on a TCP port");
++  }
++  return address;
++}
++
++async function request(options: {
++  server: http.Server;
++  method: string;
++  path: string;
++  headers?: Record<string, string>;
++}): Promise<{
++  status: number;
++  headers: http.IncomingHttpHeaders;
++  body: string;
++}> {
++  const address = serverAddress(options.server);
++  return new Promise((resolve, reject) => {
++    const req = http.request(
++      {
++        host: "127.0.0.1",
++        port: address.port,
++        method: options.method,
++        path: options.path,
++        headers: {
++          Connection: "close",
++          ...(options.headers || {}),
++        },
++      },
++      (res) => {
++        let body = "";
++        res.setEncoding("utf8");
++        res.on("data", (chunk) => {
++          body += chunk;
++        });
++        res.on("end", () =>
++          resolve({
++            status: res.statusCode || 0,
++            headers: res.headers,
++            body,
++          }),
++        );
++      },
++    );
++    req.on("error", reject);
++    req.end();
++  });
++}
++
++async function getOnce(url: string): Promise<{
++  status: number;
++  body: string;
++}> {
++  return new Promise((resolve, reject) => {
++    http
++      .get(
++        url,
++        {
++          headers: {
++            Connection: "close",
++          },
++        },
++        (res) => {
++          const chunks: Buffer[] = [];
++          res.on("data", (c) => chunks.push(Buffer.from(c)));
++          res.on("end", () =>
++            resolve({
++              status: res.statusCode || 0,
++              body: Buffer.concat(chunks).toString("utf8"),
++            }),
++          );
++        },
++      )
++      .on("error", reject);
++  });
++}
++
++async function waitForBrowserOAuthCleanup(): Promise<void> {
++  await new Promise((resolve) => setTimeout(resolve, 25));
++}
++
++function stubProviderExchange(
++  registry: ProviderRegistry,
++  providerId: "anthropic" | "codex",
++  token: TokenData,
++): void {
++  const provider = registry.get(providerId);
++  provider.exchangeCode = async (code, returnedState, expectedState) => {
++    if (returnedState !== expectedState) {
++      throw new Error("OAuth state mismatch — possible CSRF attack");
++    }
++    assert.equal(code, "auth-code");
++    return token;
++  };
++}
++
++test("isLoopbackRequest allows local callers and rejects remote callers", () => {
++  assert.equal(
++    isLoopbackRequest({
++      socket: { remoteAddress: "::ffff:127.0.0.1" },
++    } as any),
++    true,
++  );
++  assert.equal(
++    isLoopbackRequest({
++      ip: "::ffff:127.0.0.1",
++      socket: { remoteAddress: "203.0.113.10" },
++    } as any),
++    false,
++  );
++});
++
++test("AccountManager timer starters are idempotent", (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  t.after(() => {
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++  const manager = new AccountManager(authDir, {
++    provider: "codex",
++    refresh: async () => {
++      throw new Error("refresh should not run when no accounts exist");
++    },
++  });
++  t.after(() => {
++    manager.stopAutoRefresh();
++    manager.stopStatsLogger();
++  });
++
++  manager.startAutoRefresh();
++  const firstRefreshTimer = (manager as any).refreshTimer;
++  assert.ok(firstRefreshTimer);
++  manager.startAutoRefresh();
++  assert.equal((manager as any).refreshTimer, firstRefreshTimer);
++
++  manager.startStatsLogger();
++  const firstStatsTimer = (manager as any).statsTimer;
++  assert.ok(firstStatsTimer);
++  manager.startStatsLogger();
++  assert.equal((manager as any).statsTimer, firstStatsTimer);
++});
++
++test("GET /v1/claude-auth redirects to Claude OAuth without API key", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const resp = await request({
++    server,
++    method: "GET",
++    path: "/v1/claude-auth",
++  });
++
++  assert.equal(resp.status, 302);
++  const location = String(resp.headers.location || "");
++  const parsed = new URL(location);
++  assert.equal(parsed.origin, "https://claude.ai");
++  assert.equal(parsed.pathname, "/oauth/authorize");
++  assert.equal(
++    parsed.searchParams.get("redirect_uri"),
++    "http://localhost:54545/callback",
++  );
++  const state = parsed.searchParams.get("state");
++  assert.ok(state);
++  await getOnce(
++    `http://127.0.0.1:54545/callback?error=access_denied&state=${state}`,
++  );
++  await waitForBrowserOAuthCleanup();
++});
++
++test("GET /v1/codex-auth redirects to Codex OAuth without API key", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const resp = await request({
++    server,
++    method: "GET",
++    path: "/v1/codex-auth",
++  });
++
++  assert.equal(resp.status, 302);
++  const location = String(resp.headers.location || "");
++  const parsed = new URL(location);
++  assert.equal(parsed.origin, "https://auth.openai.com");
++  assert.equal(parsed.pathname, "/oauth/authorize");
++  assert.equal(
++    parsed.searchParams.get("redirect_uri"),
++    "http://localhost:1455/auth/callback",
++  );
++  const state = parsed.searchParams.get("state");
++  assert.ok(state);
++  await getOnce(
++    `http://127.0.0.1:1455/auth/callback?error=access_denied&state=${state}`,
++  );
++  await waitForBrowserOAuthCleanup();
++});
++
++test("Claude browser OAuth callback persists token and updates live manager", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const config = makeConfig(authDir);
++  const { server, registry } = await startApp(config);
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  stubProviderExchange(registry, "anthropic", {
++    accessToken: "claude-access",
++    refreshToken: "claude-refresh",
++    email: "claude@example.com",
++    expiresAt: "2030-01-01T00:00:00.000Z",
++    accountUuid: "claude-uuid",
++    provider: "anthropic",
++  });
++
++  const start = await request({
++    server,
++    method: "GET",
++    path: "/v1/claude-auth",
++  });
++  assert.equal(start.status, 302);
++  const authUrl = new URL(String(start.headers.location));
++  const state = authUrl.searchParams.get("state");
++  assert.ok(state);
++
++  const callback = await getOnce(
++    `http://127.0.0.1:54545/callback?code=auth-code&state=${state}`,
++  );
++  assert.equal(callback.status, 200);
++  assert.match(callback.body, /Claude Login Successful/);
++  await waitForBrowserOAuthCleanup();
++
++  const tokens = loadAllTokens(authDir, "anthropic");
++  assert.equal(tokens.length, 1);
++  assert.equal(tokens[0].email, "claude@example.com");
++  assert.equal(registry.get("anthropic").manager.accountCount, 1);
++});
++
++test("Codex browser OAuth callback persists token and updates live manager", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const config = makeConfig(authDir);
++  const { server, registry } = await startApp(config);
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  stubProviderExchange(registry, "codex", {
++    accessToken: "codex-access",
++    refreshToken: "codex-refresh",
++    email: "codex@example.com",
++    expiresAt: "2030-01-01T00:00:00.000Z",
++    accountUuid: "chatgpt-account",
++    provider: "codex",
++    idToken: "id.jwt.token",
++  });
++
++  const start = await request({
++    server,
++    method: "GET",
++    path: "/v1/codex-auth",
++  });
++  assert.equal(start.status, 302);
++  const authUrl = new URL(String(start.headers.location));
++  const state = authUrl.searchParams.get("state");
++  assert.ok(state);
++
++  const callback = await getOnce(
++    `http://127.0.0.1:1455/auth/callback?code=auth-code&state=${state}`,
++  );
++  assert.equal(callback.status, 200);
++  assert.match(callback.body, /Codex Login Successful/);
++  await waitForBrowserOAuthCleanup();
++
++  const tokens = loadAllTokens(authDir, "codex");
++  assert.equal(tokens.length, 1);
++  assert.equal(tokens[0].email, "codex@example.com");
++  assert.equal(registry.get("codex").manager.accountCount, 1);
++});
++
++test("browser OAuth callback rejects state mismatch without saving token", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server, registry } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  stubProviderExchange(registry, "anthropic", {
++    accessToken: "unused",
++    refreshToken: "unused",
++    email: "unused@example.com",
++    expiresAt: "2030-01-01T00:00:00.000Z",
++    accountUuid: "unused",
++    provider: "anthropic",
++  });
++
++  const start = await request({
++    server,
++    method: "GET",
++    path: "/v1/claude-auth",
++  });
++  assert.equal(start.status, 302);
++
++  const callback = await getOnce(
++    "http://127.0.0.1:54545/callback?code=auth-code&state=wrong-state",
++  );
++  assert.equal(callback.status, 400);
++  assert.match(callback.body, /state mismatch/i);
++  await waitForBrowserOAuthCleanup();
++
++  assert.equal(loadAllTokens(authDir, "anthropic").length, 0);
++  assert.equal(registry.get("anthropic").manager.accountCount, 0);
++});
++
++test("browser OAuth rejects a second in-flight login for the same provider", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const first = await request({
++    server,
++    method: "GET",
++    path: "/v1/codex-auth",
++  });
++  assert.equal(first.status, 302);
++
++  const second = await request({
++    server,
++    method: "GET",
++    path: "/v1/codex-auth",
++  });
++  assert.equal(second.status, 409);
++  assert.match(second.body, /login_in_progress/);
++
++  const authUrl = new URL(String(first.headers.location));
++  const state = authUrl.searchParams.get("state");
++  assert.ok(state);
++  await getOnce(
++    `http://127.0.0.1:1455/auth/callback?error=access_denied&state=${state}`,
++  );
++  await waitForBrowserOAuthCleanup();
++});
++
++test("GET /v1/anthropic-auth is not registered", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const resp = await request({
++    server,
++    method: "GET",
++    path: "/v1/anthropic-auth",
++  });
++
++  assert.equal(resp.status, 401);
++  assert.match(resp.body, /Missing API key/);
++});
++
++test("GET /v1/models still requires API key when no accounts are loaded", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const missingKey = await request({
++    server,
++    method: "GET",
++    path: "/v1/models",
++  });
++  assert.equal(missingKey.status, 401);
++
++  const withKey = await request({
++    server,
++    method: "GET",
++    path: "/v1/models",
++    headers: { Authorization: "Bearer test-key" },
++  });
++  assert.equal(withKey.status, 200);
++  assert.deepEqual(JSON.parse(withKey.body), { object: "list", data: [] });
++});
++
++test("startServer starts successfully with zero accounts", async (t) => {
++  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const authDir = path.join(tmp, "auth");
++  const configPath = path.join(tmp, "config.yaml");
++  fs.writeFileSync(
++    configPath,
++    [
++      'host: "127.0.0.1"',
++      "port: 0",
++      `auth-dir: "${authDir}"`,
++      "api-keys:",
++      '  - "test-key"',
++      "stats:",
++      "  enabled: false",
++    ].join("\n"),
++  );
++
++  const server = await startServer([`--config=${configPath}`]);
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(tmp, { recursive: true, force: true });
++  });
++
++  const address = serverAddress(server);
++  assert.equal(typeof address.port, "number");
++  assert.ok(address.port > 0);
++});
+diff --git a/tests/unit.test.ts b/tests/unit.test.ts
+index 0d81206..cb20c84 100644
+--- a/tests/unit.test.ts
++++ b/tests/unit.test.ts
+@@ -16,20 +16,21 @@ import {
+   anthropicToOpenai,
+   createStreamState,
+   anthropicSSEToChat,
+   responsesToAnthropic,
+   anthropicToResponses,
+   makeResponsesState,
+   anthropicSSEToResponses,
+ } from "../src/upstream/translator";
+ import { loadConfig, isDebugLevel, resolveAuthDir } from "../src/config";
+ import { UsageData } from "../src/accounts/manager";
++import { buildRegistry } from "../src/providers/registry";
+ 
+ // ══════════════════════════════════════════════════
+ // utils/common.ts
+ // ══════════════════════════════════════════════════
+ 
+ test("extractApiKey extracts Bearer token", () => {
+   assert.equal(
+     extractApiKey({ authorization: "Bearer sk-test-123" }),
+     "sk-test-123",
+   );
+@@ -1212,37 +1213,39 @@ test("StatsRecorder skips byAccount when provider/email missing", () => {
+       .requests,
+     1,
+   );
+   assert.equal(snapshot.totals.requests, 1);
+ });
+ 
+ test("createServer stats endpoint records mounted route prefix", async () => {
+   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+   const recorder = new StatsRecorder();
+   recorder.start(tmp);
++  const registry = buildRegistry(tmp);
++  for (const provider of registry.all()) provider.manager.load();
+   const app = createServer(
+     {
+       host: "",
+       port: 0,
+       "auth-dir": tmp,
+       "api-keys": new Set(["sk-test"]),
+       "body-limit": "1mb",
+       cloaking: {},
+       timeouts: {
+         "messages-ms": 1000,
+         "stream-messages-ms": 1000,
+         "count-tokens-ms": 1000,
+       },
+       stats: { enabled: true },
+       debug: "off",
+     } as any,
+-    {} as any,
++    registry,
+     recorder,
+   );
+   const server = app.listen(0);
+   try {
+     const port = (server.address() as any).port;
+     const headers = { Authorization: "Bearer sk-test" };
+     await fetch(`http://127.0.0.1:${port}/admin/stats`, { headers });
+     const second = await fetch(`http://127.0.0.1:${port}/admin/stats`, {
+       headers,
+     });
+@@ -1252,37 +1255,39 @@ test("createServer stats endpoint records mounted route prefix", async () => {
+     await new Promise<void>((resolve) => server.close(() => resolve()));
+     await recorder.stop();
+     fs.rmSync(tmp, { recursive: true, force: true });
+   }
+ });
+ 
+ test("createServer stats records client disconnects on close", async () => {
+   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+   const recorder = new StatsRecorder();
+   recorder.start(tmp);
++  const registry = buildRegistry(tmp);
++  for (const provider of registry.all()) provider.manager.load();
+   const app = createServer(
+     {
+       host: "",
+       port: 0,
+       "auth-dir": tmp,
+       "api-keys": new Set(["sk-test"]),
+       "body-limit": "1mb",
+       cloaking: {},
+       timeouts: {
+         "messages-ms": 1000,
+         "stream-messages-ms": 1000,
+         "count-tokens-ms": 1000,
+       },
+       stats: { enabled: true },
+       debug: "off",
+     } as any,
+-    {} as any,
++    registry,
+     recorder,
+   );
+   let resolveReached!: () => void;
+   const reached = new Promise<void>((resolve) => {
+     resolveReached = resolve;
+   });
+   app.get("/v1/hang", (_req, res) => {
+     if (res.locals.stats) res.locals.stats.model = "hang";
+     resolveReached();
+     // Intentionally never write a response; the client abort below should

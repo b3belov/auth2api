@@ -511,10 +511,7 @@ export class AccountManager {
     const timer = setInterval(
       () =>
         this.refreshAll().catch((err) =>
-          console.error(
-            `[${this.provider}] refresh cycle failed:`,
-            err.message,
-          ),
+          console.error(`[${this.provider}] auto-refresh failed:`, err.message),
         ),
       REFRESH_CHECK_INTERVAL_MS,
     );

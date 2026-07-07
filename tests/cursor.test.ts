@@ -193,7 +193,9 @@ test("cursor tokens round-trip through auth2api token storage", () => {
       cursorClientId: CURSOR_CLIENT_ID,
       cursorMembershipType: "pro",
     });
-    assert.deepEqual(fs.readdirSync(tmpDir), ["cursor-cursor@example.com.json"]);
+    assert.deepEqual(fs.readdirSync(tmpDir), [
+      "cursor-cursor@example.com.json",
+    ]);
     const loaded = loadAllTokens(tmpDir, "cursor");
     assert.equal(loaded.length, 1);
     assert.equal(loaded[0].provider, "cursor");
@@ -217,7 +219,9 @@ test("registry routes explicit cursor prefixes regardless of which providers are
 });
 
 test("registry exclusive-cursor mode: bare model names route to cursor when only cursor has accounts", () => {
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-cursor-only-"));
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "auth2api-cursor-only-"),
+  );
   try {
     saveToken(tmpDir, {
       accessToken: "access",
@@ -356,7 +360,10 @@ test("cursor request helpers build headers, frame payloads, and decode text", ()
 test("__resolveCursorModel maps public Anthropic/OpenAI names to Cursor SKUs", () => {
   assert.equal(__resolveCursorModel("claude-sonnet-4-5"), "claude-4.5-sonnet");
   assert.equal(__resolveCursorModel("claude-haiku-4-5"), "claude-4.5-haiku");
-  assert.equal(__resolveCursorModel("claude-opus-4-7"), "claude-opus-4-7-medium");
+  assert.equal(
+    __resolveCursorModel("claude-opus-4-7"),
+    "claude-opus-4-7-medium",
+  );
   assert.equal(__resolveCursorModel("opus"), "claude-opus-4-7-medium");
   assert.equal(__resolveCursorModel("sonnet"), "claude-4.6-sonnet-medium");
   assert.equal(__resolveCursorModel("haiku"), "claude-4.5-haiku");
@@ -469,9 +476,14 @@ test("extractCursorModelIds rejects malformed payloads gracefully", () => {
   assert.deepEqual(extractCursorModelIds(null), []);
   assert.deepEqual(extractCursorModelIds("oops" as unknown), []);
   assert.deepEqual(extractCursorModelIds({}), []);
-  assert.deepEqual(extractCursorModelIds({ models: "not-array" } as unknown), []);
   assert.deepEqual(
-    extractCursorModelIds({ models: [{ name: "DEGRADATION_STATUS_UNSPECIFIED" }] }),
+    extractCursorModelIds({ models: "not-array" } as unknown),
+    [],
+  );
+  assert.deepEqual(
+    extractCursorModelIds({
+      models: [{ name: "DEGRADATION_STATUS_UNSPECIFIED" }],
+    }),
     [],
   );
 });

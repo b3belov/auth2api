@@ -1,0 +1,3197 @@
+# Review package: origin/main..HEAD
+
+## Commits
+5288e1e fix(auth): clean partial callback startup failures
+906747a chore: remove sdd report artifacts
+9ebc70d style: apply prettier formatting
+ff58222 fix(server): clean startup readiness listeners
+4016f81 docs: document browser OAuth login URLs
+ddc9858 test(auth): add browser OAuth coverage
+0ac282d fix(server): allow first-run auth startup
+34dc93c feat(server): register browser auth routes
+95de88c fix(auth): harden browser oauth callback teardown
+f9152fe feat(auth): add shared browser oauth coordinator
+252cdee fix(accounts): make timer starters idempotent
+
+## Files changed
+ README.md                            |  16 +
+ src/accounts/manager.ts              |   7 +-
+ src/auth/browser-oauth.ts            | 342 ++++++++++++++++++++++
+ src/auth/cursor/browser-oauth.ts     |  40 ++-
+ src/auth/cursor/oauth.ts             |   9 +-
+ src/auth/cursor/storage.ts           |   9 +-
+ src/config.ts                        |   4 +-
+ src/handlers/anthropic.ts            |   5 +-
+ src/handlers/openai.ts               |   3 +-
+ src/index.ts                         |  71 +++--
+ src/providers/cursor.ts              |   9 +-
+ src/server.ts                        |  27 ++
+ src/upstream/cursor-api.ts           | 108 +++++--
+ src/upstream/responses-translator.ts |  18 +-
+ tests/browser-oauth.test.ts          | 550 +++++++++++++++++++++++++++++++++++
+ tests/codex.test.ts                  |  22 +-
+ tests/cursor.test.ts                 |  22 +-
+ tests/responses-translator.test.ts   |  70 +++--
+ tests/smoke.test.ts                  |  25 +-
+ tests/unit.test.ts                   |   9 +-
+ 20 files changed, 1219 insertions(+), 147 deletions(-)
+
+## Diff
+diff --git a/README.md b/README.md
+index 26423ea..fd8dbd0 100644
+--- a/README.md
++++ b/README.md
+@@ -42,20 +42,34 @@ npm run build
+ ## Login
+ 
+ auth2api supports these upstream providers:
+ 
+ - `anthropic` — Claude OAuth (default). Used for `claude-*` models.
+ - `codex` — OpenAI's "Sign in with ChatGPT" OAuth, talking to the official codex backend at `https://chatgpt.com/backend-api/codex/responses`. Used for `gpt-5*` (incl. `gpt-5-codex`), `o\d*`, and `codex-*` models. Requires a **ChatGPT Plus or Pro** subscription — Free accounts authenticate but the first call fails with `model not supported`.
+ - `cursor` — experimental Cursor account, authorized either through a browser deep-link PKCE flow (default) or by importing the local Cursor desktop login. **Routing**: in multi-provider setups Cursor only serves models with an explicit `cursor-*` or `cr/*` prefix. In **Cursor-exclusive mode** (only Cursor is logged in, no `anthropic`/`codex` accounts), every request — including bare `claude-*` or `gpt-*` model names — is auto-routed through Cursor so off-the-shelf Claude Code / OpenAI clients work without a prefix.
+ 
+ Pick the provider with `--provider=`. Default is `anthropic`.
+ 
++### Browser mode from the running server
++
++When the server is running locally, you can start OAuth from a normal browser page:
++
++```bash
++# Claude
++open http://127.0.0.1:8317/v1/claude-auth
++
++# Codex / ChatGPT
++open http://127.0.0.1:8317/v1/codex-auth
++```
++
++These routes are localhost-only and do not require an API key because they start an interactive browser login. Successful login writes the same token files as the CLI flow (`claude-<email>.json` or `codex-<email>.json`) and updates the running server immediately.
++
+ ### Auto mode (requires local browser)
+ 
+ ```bash
+ # Claude (default)
+ node dist/index.js --login
+ 
+ # Codex (ChatGPT Plus/Pro)
+ node dist/index.js --login --provider=codex
+ 
+ # Cursor (experimental; opens a browser to authorize your Cursor account)
+@@ -241,20 +255,22 @@ The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.re
+ | Endpoint                         | Description                                                           |
+ | -------------------------------- | --------------------------------------------------------------------- |
+ | `POST /v1/chat/completions`      | OpenAI-compatible chat                                                |
+ | `POST /v1/responses`             | OpenAI Responses API compatibility                                    |
+ | `POST /v1/messages`              | Claude native passthrough                                             |
+ | `POST /v1/messages/count_tokens` | Claude token counting                                                 |
+ | `GET /v1/models`                 | List available models                                                 |
+ | `GET /admin/accounts`            | Account health/status (API key required)                              |
+ | `GET /admin/stats`               | Per-client / per-account / per-API call statistics (API key required) |
+ | `POST /admin/reload`             | Reload tokens from disk (API key required)                            |
++| `GET /v1/claude-auth`            | Start Claude OAuth login from a local browser                         |
++| `GET /v1/codex-auth`             | Start Codex OAuth login from a local browser                          |
+ | `GET /health`                    | Health check                                                          |
+ 
+ ## Docker
+ 
+ ```bash
+ # Build
+ docker build -t auth2api .
+ 
+ # Run (mount your config and token directory)
+ docker run -d \
+diff --git a/src/accounts/manager.ts b/src/accounts/manager.ts
+index 95da10c..922df17 100644
+--- a/src/accounts/manager.ts
++++ b/src/accounts/manager.ts
+@@ -500,45 +500,44 @@ export class AccountManager {
+         totalReasoningOutputTokens: acct.totalReasoningOutputTokens,
+         expiresAt: acct.token.expiresAt,
+         refreshing: acct.refreshPromise !== null,
+         planType: acct.token.planType,
+       });
+     }
+     return snapshots;
+   }
+ 
+   startAutoRefresh(): void {
++    if (this.refreshTimer) return;
+     const timer = setInterval(
+       () =>
+         this.refreshAll().catch((err) =>
+-          console.error(
+-            `[${this.provider}] refresh cycle failed:`,
+-            err.message,
+-          ),
++          console.error(`[${this.provider}] auto-refresh failed:`, err.message),
+         ),
+       REFRESH_CHECK_INTERVAL_MS,
+     );
+     timer.unref();
+     this.refreshTimer = timer;
+     this.refreshAll().catch((err) =>
+       console.error(`[${this.provider}] initial refresh failed:`, err.message),
+     );
+   }
+ 
+   stopAutoRefresh(): void {
+     if (this.refreshTimer) {
+       clearInterval(this.refreshTimer);
+       this.refreshTimer = null;
+     }
+   }
+ 
+   startStatsLogger(): void {
++    if (this.statsTimer) return;
+     const timer = setInterval(() => this.logStats(), 5 * 60 * 1000);
+     timer.unref();
+     this.statsTimer = timer;
+   }
+ 
+   stopStatsLogger(): void {
+     if (this.statsTimer) {
+       clearInterval(this.statsTimer);
+       this.statsTimer = null;
+     }
+diff --git a/src/auth/browser-oauth.ts b/src/auth/browser-oauth.ts
+new file mode 100644
+index 0000000..e2af859
+--- /dev/null
++++ b/src/auth/browser-oauth.ts
+@@ -0,0 +1,342 @@
++import crypto from "crypto";
++import express, { Request, Response } from "express";
++import http from "http";
++import { URL } from "url";
++import { generatePKCECodes } from "./pkce";
++import { Provider } from "../providers/types";
++
++const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
++const LOOPBACK_HOSTS = ["127.0.0.1", "::1"] as const;
++
++const inFlight = new Map<string, Promise<void>>();
++
++function escapeHtml(value: string): string {
++  return value
++    .replace(/&/g, "&amp;")
++    .replace(/</g, "&lt;")
++    .replace(/>/g, "&gt;")
++    .replace(/"/g, "&quot;")
++    .replace(/'/g, "&#39;");
++}
++
++function page(title: string, body: string): string {
++  return `<!DOCTYPE html>
++<html>
++<head>
++  <meta charset="utf-8">
++  <title>${escapeHtml(title)}</title>
++</head>
++<body style="font-family:sans-serif;text-align:center;padding-top:80px">
++  <h1>${escapeHtml(title)}</h1>
++  <p>${body}</p>
++</body>
++</html>`;
++}
++
++export function isLoopbackAddress(address: string | undefined): boolean {
++  if (!address) return false;
++  const normalized = address.toLowerCase();
++  return (
++    normalized === "127.0.0.1" ||
++    normalized === "::1" ||
++    normalized === "::ffff:127.0.0.1"
++  );
++}
++
++export function isLoopbackRequest(req: Request): boolean {
++  return isLoopbackAddress(req.socket.remoteAddress);
++}
++
++export interface BrowserOAuthHandlerOptions {
++  provider: Provider;
++  displayName: string;
++  onAccountAdded?: (provider: Provider) => void;
++  timeoutMs?: number;
++}
++
++function closeServer(server: http.Server): Promise<void> {
++  return new Promise((resolve, reject) => {
++    server.close((err) => {
++      if (err) {
++        reject(err);
++        return;
++      }
++
++      resolve();
++    });
++  });
++}
++
++function startBrowserCallback(options: {
++  provider: Provider;
++  state: string;
++  pkce: ReturnType<typeof generatePKCECodes>;
++  displayName: string;
++  timeoutMs: number;
++  onAccountAdded?: (provider: Provider) => void;
++}): Promise<{ done: Promise<void> }> {
++  const { provider, state, pkce, displayName, timeoutMs, onAccountAdded } =
++    options;
++  const port = provider.oauth.callbackPort;
++  const callbackPath = provider.oauth.callbackPath;
++
++  return new Promise((resolveStarted, rejectStarted) => {
++    let resolveDone!: () => void;
++    let rejectDone!: (err: Error) => void;
++    let settled = false;
++    let startupFailed = false;
++    let startupResolved = false;
++    const listeningServers = new Set<http.Server>();
++    const done = new Promise<void>((resolve, reject) => {
++      resolveDone = resolve;
++      rejectDone = reject;
++    });
++
++    const requestHandler: http.RequestListener = async (req, res) => {
++      const url = new URL(req.url || "/", `http://localhost:${port}`);
++
++      if (url.pathname !== callbackPath) {
++        res.writeHead(404, { "Content-Type": "text/plain" });
++        res.end("Not found");
++        return;
++      }
++
++      const error = url.searchParams.get("error");
++      if (error) {
++        const message = `OAuth error: ${error}`;
++        res.writeHead(400, { "Content-Type": "text/html" });
++        res.end(page(`${displayName} Login Failed`, escapeHtml(message)));
++        await finish(new Error(message));
++        return;
++      }
++
++      const code = url.searchParams.get("code") || "";
++      const returnedState = url.searchParams.get("state") || "";
++
++      if (!code || !returnedState) {
++        const message = "OAuth callback missing code or state parameter";
++        res.writeHead(400, { "Content-Type": "text/html" });
++        res.end(
++          page(
++            `${displayName} Login Failed`,
++            "The callback was missing an authorization code or state.",
++          ),
++        );
++        await finish(new Error(message));
++        return;
++      }
++
++      try {
++        const token = await provider.exchangeCode(
++          code,
++          returnedState,
++          state,
++          pkce,
++        );
++        if (!token.provider) token.provider = provider.id;
++        provider.manager.addAccount(token);
++        onAccountAdded?.(provider);
++
++        res.writeHead(200, { "Content-Type": "text/html" });
++        res.end(
++          page(
++            `${displayName} Login Successful`,
++            `Account ${escapeHtml(token.email)} was saved. You can close this tab.`,
++          ),
++        );
++        await finish();
++      } catch (err: any) {
++        const message = err?.message || String(err);
++        res.writeHead(400, { "Content-Type": "text/html" });
++        res.end(page(`${displayName} Login Failed`, escapeHtml(message)));
++        await finish(new Error(message));
++      }
++    };
++
++    const timer = setTimeout(() => {
++      void finish(new Error(`${displayName} OAuth callback timeout`));
++    }, timeoutMs);
++
++    async function shutdownServers(): Promise<void> {
++      clearTimeout(timer);
++      const servers = Array.from(listeningServers);
++      if (servers.length === 0) return;
++
++      await Promise.all(
++        servers.map(async (server) => {
++          await closeServer(server);
++          listeningServers.delete(server);
++        }),
++      );
++    }
++
++    async function finish(error?: Error): Promise<void> {
++      if (settled) return;
++      settled = true;
++
++      try {
++        await shutdownServers();
++      } catch (closeErr) {
++        const closeError =
++          closeErr instanceof Error ? closeErr : new Error(String(closeErr));
++        if (!error) {
++          error = closeError;
++        } else {
++          error = new Error(`${error.message}; ${closeError.message}`);
++        }
++      }
++
++      if (error) {
++        rejectDone(error);
++        return;
++      }
++
++      resolveDone();
++    }
++
++    async function failStartup(err: Error): Promise<void> {
++      if (startupResolved || startupFailed) return;
++      startupFailed = true;
++      settled = true;
++
++      try {
++        await shutdownServers();
++      } catch (closeErr) {
++        const closeError =
++          closeErr instanceof Error ? closeErr : new Error(String(closeErr));
++        err = new Error(`${err.message}; ${closeError.message}`);
++      }
++
++      rejectStarted(err);
++    }
++
++    const servers = LOOPBACK_HOSTS.map((host) => {
++      const server = http.createServer(requestHandler);
++
++      server.once("error", (err) => {
++        const serverError = err instanceof Error ? err : new Error(String(err));
++
++        if (startupFailed || settled) {
++          return;
++        }
++
++        if (startupResolved) {
++          void finish(serverError);
++          return;
++        }
++
++        void failStartup(serverError);
++      });
++
++      return { host, server };
++    });
++
++    let pendingStarts = servers.length;
++
++    for (const { host, server } of servers) {
++      server.listen(
++        host === "::1" ? { port, host, ipv6Only: true } : { port, host },
++        () => {
++          if (startupFailed || settled) {
++            closeServer(server).catch((err) => {
++              console.error(
++                `[${provider.id}] failed to close late OAuth callback listener: ${err?.message || String(err)}`,
++              );
++            });
++            return;
++          }
++
++          listeningServers.add(server);
++          pendingStarts -= 1;
++
++          if (pendingStarts === 0 && !startupResolved) {
++            startupResolved = true;
++            resolveStarted({ done });
++          }
++        },
++      );
++    }
++  });
++}
++
++export function createBrowserOAuthHandler(
++  options: BrowserOAuthHandlerOptions,
++): express.RequestHandler {
++  const timeoutMs = options.timeoutMs ?? LOGIN_TIMEOUT_MS;
++
++  return async (req: Request, res: Response) => {
++    if (!isLoopbackRequest(req)) {
++      res.status(403).json({
++        error: {
++          message: "Browser OAuth login is only available from localhost",
++          type: "loopback_only",
++        },
++      });
++      return;
++    }
++
++    const key = options.provider.id;
++    if (inFlight.has(key)) {
++      res.status(409).json({
++        error: {
++          message: `${options.displayName} OAuth login is already in progress`,
++          type: "login_in_progress",
++          provider: options.provider.id,
++        },
++      });
++      return;
++    }
++
++    const pkce = generatePKCECodes();
++    const state = crypto.randomBytes(16).toString("hex");
++    let authUrl: string;
++    try {
++      authUrl = options.provider.buildAuthUrl(state, pkce);
++    } catch (err: any) {
++      res.status(500).json({
++        error: {
++          message: `Could not build ${options.displayName} OAuth URL: ${err?.message || String(err)}`,
++          type: "auth_url_build_failed",
++          provider: options.provider.id,
++        },
++      });
++      return;
++    }
++
++    const startPromise = startBrowserCallback({
++      provider: options.provider,
++      state,
++      pkce,
++      displayName: options.displayName,
++      timeoutMs,
++      onAccountAdded: options.onAccountAdded,
++    });
++    const pending = startPromise
++      .then(({ done }) => done)
++      .finally(() => {
++        inFlight.delete(key);
++      });
++    inFlight.set(key, pending);
++    pending.catch((err) => {
++      console.error(
++        `[${options.provider.id}] browser OAuth failed: ${err?.message || String(err)}`,
++      );
++    });
++
++    try {
++      await startPromise;
++    } catch (err: any) {
++      inFlight.delete(key);
++      res.status(500).json({
++        error: {
++          message: `Could not start ${options.displayName} OAuth callback server: ${err?.message || String(err)}`,
++          type: "callback_server_start_failed",
++          provider: options.provider.id,
++        },
++      });
++      return;
++    }
++
++    res.redirect(302, authUrl);
++  };
++}
+diff --git a/src/auth/cursor/browser-oauth.ts b/src/auth/cursor/browser-oauth.ts
+index 576ed62..e862998 100644
+--- a/src/auth/cursor/browser-oauth.ts
++++ b/src/auth/cursor/browser-oauth.ts
+@@ -81,67 +81,77 @@ function http2Get(
+       clearTimeout(timer);
+       client.close();
+     };
+     const finish = (fn: () => void) => {
+       if (settled) return;
+       settled = true;
+       cleanup();
+       fn();
+     };
+     const timer = setTimeout(() => {
+-      finish(() => reject(new Error("cursor auth/poll HTTP/2 request timed out")));
++      finish(() =>
++        reject(new Error("cursor auth/poll HTTP/2 request timed out")),
++      );
+     }, timeoutMs);
+ 
+     client.on("error", (err) => finish(() => reject(err)));
+ 
+     const req = client.request({
+       ":method": "GET",
+       ":path": `${parsed.pathname}${parsed.search}`,
+       ...Object.fromEntries(
+         Object.entries(headers).map(([k, v]) => [k.toLowerCase(), v]),
+       ),
+     });
+     let status = 0;
+     const chunks: Buffer[] = [];
+     req.on("error", (err) => finish(() => reject(err)));
+     req.on("response", (h) => {
+       status = Number(h[":status"] || 0);
+     });
+     req.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+     req.on("end", () =>
+-      finish(() => resolve({ status, body: Buffer.concat(chunks).toString("utf8") })),
++      finish(() =>
++        resolve({ status, body: Buffer.concat(chunks).toString("utf8") }),
++      ),
+     );
+     req.end();
+   });
+ }
+ 
+ export interface CursorPkceParams {
+   uuid: string;
+   verifier: string;
+   challenge: string;
+ }
+ 
+ export interface CursorPollResponse {
+   accessToken: string;
+   refreshToken?: string;
+   authId?: string;
+   /** Some Cursor builds return `apiKey` for API-key style sessions. */
+   apiKey?: string;
+ }
+ 
+ function base64UrlEncode(buf: Buffer): string {
+-  return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
++  return buf
++    .toString("base64")
++    .replace(/\+/g, "-")
++    .replace(/\//g, "_")
++    .replace(/=+$/, "");
+ }
+ 
+ export function generateCursorPkce(): CursorPkceParams {
+   const verifier = base64UrlEncode(randomBytes(32));
+-  const challenge = base64UrlEncode(createHash("sha256").update(verifier).digest());
++  const challenge = base64UrlEncode(
++    createHash("sha256").update(verifier).digest(),
++  );
+   return { uuid: uuidv4(), verifier, challenge };
+ }
+ 
+ export function buildCursorLoginUrl(
+   pkce: CursorPkceParams,
+   baseUrl: string = DEFAULT_LOGIN_URL,
+ ): string {
+   const url = new URL(baseUrl);
+   url.searchParams.set("challenge", pkce.challenge);
+   url.searchParams.set("uuid", pkce.uuid);
+@@ -178,21 +188,24 @@ async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+       reject(new Error("aborted"));
+     };
+     signal?.addEventListener("abort", onAbort, { once: true });
+   });
+ }
+ 
+ /** One-shot poll attempt. Returns null when not yet authorized. */
+ export async function pollCursorAuthOnce(
+   uuid: string,
+   verifier: string,
+-  options: Pick<CursorBrowserLoginOptions, "pollUrl" | "userAgent" | "fetchImpl"> = {},
++  options: Pick<
++    CursorBrowserLoginOptions,
++    "pollUrl" | "userAgent" | "fetchImpl"
++  > = {},
+ ): Promise<CursorPollResponse | null> {
+   const url = new URL(options.pollUrl || DEFAULT_POLL_URL);
+   url.searchParams.set("uuid", uuid);
+   url.searchParams.set("verifier", verifier);
+ 
+   let status: number;
+   let bodyText: string;
+   if (options.fetchImpl) {
+     // Test paths (and any caller that wants to inject a transport) keep using
+     // a fetch-shaped function so they can mock easily.
+@@ -204,21 +217,23 @@ export async function pollCursorAuthOnce(
+     bodyText = await resp.text().catch(() => "");
+   } else {
+     const resp = await http2Get(url.toString(), pollHeaders(options.userAgent));
+     status = resp.status;
+     bodyText = resp.body;
+   }
+ 
+   if (status === 404) return null; // Cursor returns 404 while waiting.
+   if (status === 202) return null; // Some builds use 202 Accepted.
+   if (status < 200 || status >= 300) {
+-    throw new Error(`cursor auth/poll failed: HTTP ${status} ${bodyText.slice(0, 200)}`);
++    throw new Error(
++      `cursor auth/poll failed: HTTP ${status} ${bodyText.slice(0, 200)}`,
++    );
+   }
+   let parsed: any;
+   try {
+     parsed = JSON.parse(bodyText);
+   } catch {
+     return null;
+   }
+   if (!parsed || typeof parsed !== "object") return null;
+   if (!parsed.accessToken && !parsed.apiKey) return null;
+   return {
+@@ -259,21 +274,22 @@ function isTransientNetworkError(err: unknown): boolean {
+ }
+ 
+ export async function pollCursorAuth(
+   uuid: string,
+   verifier: string,
+   options: CursorBrowserLoginOptions = {},
+ ): Promise<CursorPollResponse> {
+   const interval = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+   const backoff = options.pollBackoff ?? DEFAULT_POLL_BACKOFF;
+   const maxInterval = options.pollMaxIntervalMs ?? DEFAULT_POLL_MAX_INTERVAL_MS;
+-  const deadline = Date.now() + (options.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS);
++  const deadline =
++    Date.now() + (options.pollTimeoutMs ?? DEFAULT_POLL_TIMEOUT_MS);
+   let current = interval;
+   let consecutiveErrors = 0;
+   while (true) {
+     if (Date.now() > deadline) {
+       throw new Error(
+         "cursor browser login timed out before the user confirmed in the browser",
+       );
+     }
+     try {
+       const result = await pollCursorAuthOnce(uuid, verifier, options);
+@@ -286,27 +302,33 @@ export async function pollCursorAuth(
+         throw new Error(
+           `cursor auth/poll repeatedly failed: ${(err as Error).message}`,
+         );
+       }
+     }
+     await sleep(current, options.signal);
+     current = Math.min(maxInterval, Math.round(current * backoff));
+   }
+ }
+ 
+-function emailFromAuthId(authId: string | undefined, accessToken?: string): string {
++function emailFromAuthId(
++  authId: string | undefined,
++  accessToken?: string,
++): string {
+   // authId is usually `provider|user_xxxx`. We don't get the email back from
+   // poll(), so we derive a stable placeholder unless an id_token tells us
+   // otherwise. Token storage uses the email as the file suffix.
+   if (accessToken) {
+     try {
+-      const claims = decodeJwtPayload(accessToken) as { email?: string; sub?: string };
++      const claims = decodeJwtPayload(accessToken) as {
++        email?: string;
++        sub?: string;
++      };
+       if (typeof claims.email === "string" && claims.email.length > 0) {
+         return claims.email;
+       }
+       if (typeof claims.sub === "string") {
+         return `${claims.sub.replace(/[^a-zA-Z0-9_-]/g, "_")}@cursor.local`;
+       }
+     } catch {
+       /* ignore */
+     }
+   }
+diff --git a/src/auth/cursor/oauth.ts b/src/auth/cursor/oauth.ts
+index 41f6771..bebafc9 100644
+--- a/src/auth/cursor/oauth.ts
++++ b/src/auth/cursor/oauth.ts
+@@ -1,17 +1,14 @@
+ import { TokenData } from "../types";
+ import { decodeJwtPayload } from "../../utils/jwt";
+ import { RefreshTokenExhaustedError } from "../refresh-errors";
+-import {
+-  CURSOR_CLIENT_ID,
+-  DEFAULT_CURSOR_CLIENT_VERSION,
+-} from "./storage";
++import { CURSOR_CLIENT_ID, DEFAULT_CURSOR_CLIENT_VERSION } from "./storage";
+ 
+ const TOKEN_URL = "https://api2.cursor.sh/oauth/token";
+ 
+ function expiryFromJwt(accessToken: string): string {
+   try {
+     const claims = decodeJwtPayload(accessToken) as { exp?: number };
+     if (claims.exp) return new Date(claims.exp * 1000).toISOString();
+   } catch {
+     // Keep a short fallback because Cursor access tokens are expected to be JWTs.
+   }
+@@ -67,21 +64,23 @@ export async function refreshCursorTokens(
+     }),
+   });
+ 
+   if (!resp.ok) {
+     const text = await resp.text();
+     throw new Error(`Cursor token refresh failed (${resp.status}): ${text}`);
+   }
+ 
+   const data = (await resp.json()) as CursorRefreshResponse;
+   if (data.shouldLogout || !data.access_token) {
+-    throw new Error("Cursor refresh token is no longer valid; re-login in Cursor");
++    throw new Error(
++      "Cursor refresh token is no longer valid; re-login in Cursor",
++    );
+   }
+ 
+   return {
+     accessToken: data.access_token,
+     refreshToken: data.refresh_token || refreshToken,
+     email: previous.email || emailFromJwt(data.access_token) || "unknown",
+     expiresAt: expiryFromJwt(data.access_token),
+     accountUuid:
+       previous.accountUuid || previous.cursorServiceMachineId || "cursor",
+     provider: "cursor",
+diff --git a/src/auth/cursor/storage.ts b/src/auth/cursor/storage.ts
+index 0333910..f324c34 100644
+--- a/src/auth/cursor/storage.ts
++++ b/src/auth/cursor/storage.ts
+@@ -62,23 +62,23 @@ function readJsonStorage(storagePath: string): CursorStorageMap {
+   const out: CursorStorageMap = {};
+   for (const key of CURSOR_KEYS) {
+     if (parsed[key] !== undefined) out[key] = coerceStorageValue(parsed[key]);
+   }
+   return out;
+ }
+ 
+ function readSqliteStorage(storagePath: string): CursorStorageMap {
+   const out: CursorStorageMap = {};
+   let lastError: any = null;
+-  const quotedKeys = CURSOR_KEYS.map((key) => `'${key.replace(/'/g, "''")}'`).join(
+-    ",",
+-  );
++  const quotedKeys = CURSOR_KEYS.map(
++    (key) => `'${key.replace(/'/g, "''")}'`,
++  ).join(",");
+   for (const table of ["ItemTable", "cursorDiskKV"]) {
+     const select = `SELECT key, value FROM ${table} WHERE key IN (${quotedKeys});`;
+     try {
+       const output = execFileSync("sqlite3", ["-json", storagePath, select], {
+         encoding: "utf-8",
+         stdio: ["ignore", "pipe", "pipe"],
+         timeout: 10_000,
+       });
+       const rows = JSON.parse(output || "[]") as Array<{
+         key?: string;
+@@ -124,21 +124,22 @@ export function cursorTokenFromStorage(
+   overrides: Partial<TokenData> = {},
+ ): TokenData {
+   const accessToken = storage["cursorAuth/accessToken"];
+   const refreshToken = storage["cursorAuth/refreshToken"];
+   if (!accessToken || !refreshToken) {
+     throw new Error(
+       "Cursor local storage is missing cursorAuth/accessToken or cursorAuth/refreshToken",
+     );
+   }
+ 
+-  const email = storage["cursorAuth/cachedEmail"] || overrides.email || "unknown";
++  const email =
++    storage["cursorAuth/cachedEmail"] || overrides.email || "unknown";
+   const serviceMachineId =
+     storage["storage.serviceMachineId"] ||
+     overrides.cursorServiceMachineId ||
+     uuidv4();
+ 
+   return {
+     accessToken,
+     refreshToken,
+     email,
+     expiresAt: expiryFromJwt(accessToken),
+diff --git a/src/config.ts b/src/config.ts
+index 97acf55..81deb8d 100644
+--- a/src/config.ts
++++ b/src/config.ts
+@@ -148,21 +148,23 @@ function normalizeReasoningConfig(value: unknown): ReasoningConfig {
+     }
+   }
+ 
+   if (raw.codex !== undefined) {
+     if (
+       typeof raw.codex === "string" &&
+       CODEX_REASONING_LEVELS.has(raw.codex as CodexReasoningLevel)
+     ) {
+       reasoning.codex = raw.codex as CodexReasoningLevel;
+     } else {
+-      console.warn(`Ignoring invalid reasoning.codex value: ${String(raw.codex)}`);
++      console.warn(
++        `Ignoring invalid reasoning.codex value: ${String(raw.codex)}`,
++      );
+     }
+   }
+ 
+   return reasoning;
+ }
+ 
+ export function isDebugLevel(
+   debug: DebugMode,
+   level: Exclude<DebugMode, "off">,
+ ): boolean {
+diff --git a/src/handlers/anthropic.ts b/src/handlers/anthropic.ts
+index b3d07d1..9ad8c19 100644
+--- a/src/handlers/anthropic.ts
++++ b/src/handlers/anthropic.ts
+@@ -238,24 +238,21 @@ export function createMessagesHandler(
+         return;
+       }
+ 
+       // Cursor only ever streams; force `stream:true` so the upstream call is
+       // routed through our SSE adapter even when the client asked for a
+       // non-streaming response. We still respond with SSE in that case
+       // because converting Cursor's protobuf reply to Anthropic non-stream
+       // JSON is a separate adapter we haven't written yet.
+       const stream = provider.id === "cursor" ? true : !!body.stream;
+       const upstreamBody = { ...body };
+-      applyAnthropicReasoningDefault(
+-        upstreamBody,
+-        config.reasoning?.anthropic,
+-      );
++      applyAnthropicReasoningDefault(upstreamBody, config.reasoning?.anthropic);
+ 
+       await proxyWithRetry("Messages", resp, config, {
+         manager: provider.manager,
+         upstream: (account, signal) => {
+           const cloaked =
+             provider.applyCloaking?.({
+               body: upstreamBody,
+               request: req,
+               account,
+               config,
+diff --git a/src/handlers/openai.ts b/src/handlers/openai.ts
+index 1b206c4..c9282cf 100644
+--- a/src/handlers/openai.ts
++++ b/src/handlers/openai.ts
+@@ -835,21 +835,22 @@ export function createResponsesCompactHandler(
+               usage = JSON.parse(text)?.usage ?? null;
+             } catch {
+               /* best-effort stats only */
+             }
+             if (contentType) resp.setHeader("Content-Type", contentType);
+             resp.status(upstream.status).send(text);
+           }
+ 
+           const codexCompactUsage = {
+             inputTokens: usage?.input_tokens || streamUsage?.inputTokens || 0,
+-            outputTokens: usage?.output_tokens || streamUsage?.outputTokens || 0,
++            outputTokens:
++              usage?.output_tokens || streamUsage?.outputTokens || 0,
+             cacheCreationInputTokens: 0,
+             cacheReadInputTokens:
+               usage?.input_tokens_details?.cached_tokens ||
+               streamUsage?.cacheReadInputTokens ||
+               0,
+             reasoningOutputTokens:
+               usage?.output_tokens_details?.reasoning_tokens ||
+               streamUsage?.reasoningOutputTokens ||
+               0,
+           };
+diff --git a/src/index.ts b/src/index.ts
+index be49146..ddafb0a 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,10 +1,11 @@
++import http from "http";
+ import crypto from "crypto";
+ import readline from "readline";
+ import { Config, loadConfig, resolveAuthDir } from "./config";
+ import { ProviderId } from "./auth/types";
+ import { generatePKCECodes } from "./auth/pkce";
+ import { waitForCallback } from "./auth/callback-server";
+ import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
+ import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
+ import { buildRegistry, ProviderRegistry } from "./providers/registry";
+ import { createServer } from "./server";
+@@ -135,83 +136,105 @@ async function doLogin(
+     state,
+     pkce,
+   );
+   if (!tokenData.provider) tokenData.provider = provider.id;
+   provider.manager.addAccount(tokenData);
+   console.log(`\nLogin successful! Account: ${tokenData.email}`);
+   console.log(`Token expires: ${tokenData.expiresAt}`);
+   await notifyServerReload(config);
+ }
+ 
+-async function startServer(): Promise<void> {
+-  const configPath = process.argv
+-    .find((a) => a.startsWith("--config="))
+-    ?.split("=")[1];
++export async function startServer(
++  args = process.argv.slice(2),
++): Promise<http.Server> {
++  const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
+   const config = loadConfig(configPath);
+   const authDir = resolveAuthDir(config["auth-dir"]);
+ 
+   const registry = buildRegistry(authDir);
+   for (const p of registry.all()) p.manager.load();
+ 
+   const totalAccounts = registry
+     .all()
+     .reduce((sum, p) => sum + p.manager.accountCount, 0);
+   if (totalAccounts === 0) {
+     console.log(
+-      "No accounts found. Run with --login (and optionally --provider=codex) to add an account first.",
++      "No accounts found. Start a browser login at /v1/claude-auth or /v1/codex-auth, or run with --login.",
+     );
+-    process.exit(1);
+   }
+ 
+   for (const p of registry.all()) {
+     if (p.manager.accountCount > 0) {
+       p.manager.startAutoRefresh();
+       p.manager.startStatsLogger();
+     }
+   }
+ 
+   let statsRecorder: StatsRecorder | undefined;
+   if (config.stats.enabled) {
+     statsRecorder = new StatsRecorder();
+     statsRecorder.start(authDir);
+   }
+ 
+   const app = createServer(config, registry, statsRecorder);
+   const host = config.host || "127.0.0.1";
+   const port = config.port;
+ 
+-  app.listen(port, host, () => {
+-    console.log(`auth2api running on http://${host}:${port}`);
+-    console.log(`Endpoints:`);
+-    console.log(`  POST /v1/chat/completions`);
+-    console.log(`  POST /v1/responses`);
+-    console.log(`  POST /v1/messages`);
+-    console.log(`  POST /v1/messages/count_tokens`);
+-    console.log(`  GET  /v1/models`);
+-    console.log(`  GET  /admin/accounts`);
+-    if (statsRecorder) console.log(`  GET  /admin/stats`);
+-    console.log(`  GET  /health`);
++  const server = app.listen(port, host);
++
++  await new Promise<void>((resolve, reject) => {
++    const onListening = () => {
++      server.off("error", onError);
++      resolve();
++    };
++    const onError = (err: Error) => {
++      server.off("listening", onListening);
++      reject(err);
++    };
++
++    server.once("listening", onListening);
++    server.once("error", onError);
+   });
+ 
+-  process.on("SIGINT", () => {
++  console.log(`auth2api running on http://${host}:${port}`);
++  console.log(`Endpoints:`);
++  console.log(`  POST /v1/chat/completions`);
++  console.log(`  POST /v1/responses`);
++  console.log(`  POST /v1/messages`);
++  console.log(`  POST /v1/messages/count_tokens`);
++  console.log(`  GET  /v1/models`);
++  console.log(`  GET  /v1/claude-auth`);
++  console.log(`  GET  /v1/codex-auth`);
++  console.log(`  GET  /admin/accounts`);
++  if (statsRecorder) console.log(`  GET  /admin/stats`);
++  console.log(`  GET  /health`);
++
++  const handleSigint = () => {
+     for (const p of registry.all()) {
+       p.manager.stopAutoRefresh();
+       p.manager.stopStatsLogger();
+     }
+     if (statsRecorder) {
+       // Best-effort flush — exit even if close hangs so SIGINT stays responsive.
+       statsRecorder.stop().finally(() => process.exit(0));
+       setTimeout(() => process.exit(0), 1000).unref();
+       return;
+     }
+     process.exit(0);
++  };
++
++  process.on("SIGINT", handleSigint);
++  server.once("close", () => {
++    process.off("SIGINT", handleSigint);
+   });
++
++  return server;
+ }
+ 
+ async function main(): Promise<void> {
+   const args = process.argv.slice(2);
+   const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
+   const config = loadConfig(configPath);
+   const authDir = resolveAuthDir(config["auth-dir"]);
+ 
+   if (args.includes("--login")) {
+     const manual = args.includes("--manual");
+@@ -224,18 +247,20 @@ async function main(): Promise<void> {
+     if (providerId === "cursor") {
+       if (cursorStorage || args.includes("--cursor-import-local")) {
+         await importCursorLogin(config, registry, cursorStorage);
+       } else {
+         await browserCursorLogin(config, registry);
+       }
+     } else {
+       await doLogin(config, registry, providerId, manual);
+     }
+   } else {
+-    await startServer();
++    await startServer(args);
+   }
+ }
+ 
+-main().catch((err) => {
+-  console.error("Fatal:", err.message);
+-  process.exit(1);
+-});
++if (require.main === module) {
++  main().catch((err) => {
++    console.error("Fatal:", err.message);
++    process.exit(1);
++  });
++}
+diff --git a/src/providers/cursor.ts b/src/providers/cursor.ts
+index e6da22c..68d77d5 100644
+--- a/src/providers/cursor.ts
++++ b/src/providers/cursor.ts
+@@ -1,18 +1,15 @@
+ import { PKCECodes, TokenData } from "../auth/types";
+ import { loadAllTokens } from "../auth/token-storage";
+ import { refreshCursorTokensWithRetry } from "../auth/cursor/oauth";
+ import { AccountManager } from "../accounts/manager";
+-import {
+-  callCursorResponses,
+-  listCursorModels,
+-} from "../upstream/cursor-api";
++import { callCursorResponses, listCursorModels } from "../upstream/cursor-api";
+ import { Provider, UpstreamCallContext, ProviderOAuthInfo } from "./types";
+ 
+ const CURSOR_OAUTH: ProviderOAuthInfo = {
+   callbackPort: 0,
+   callbackPath: "/cursor/import-local",
+ };
+ 
+ const MODEL_RE = /^(cursor[-/:]|cr\/)/i;
+ 
+ export function buildCursorProvider(authDir: string): Provider {
+@@ -32,21 +29,23 @@ export function buildCursorProvider(authDir: string): Provider {
+     nativeFormat: "openai-responses",
+     manager,
+     oauth: CURSOR_OAUTH,
+     matchesModel: (model: string) => MODEL_RE.test(model),
+     buildAuthUrl: (_state: string, _pkce: PKCECodes) => {
+       throw new Error(
+         "Cursor provider uses local Cursor login import; run --login --provider=cursor",
+       );
+     },
+     exchangeCode: async () => {
+-      throw new Error("Cursor provider does not implement browser OAuth exchange");
++      throw new Error(
++        "Cursor provider does not implement browser OAuth exchange",
++      );
+     },
+     listModels: () => listCursorModels(manager),
+     callMessages: (opts: UpstreamCallContext) => {
+       // Pick the SSE/JSON wire format that matches the inbound endpoint so
+       // any of the three "OpenAI-compatible" client conventions can use a
+       // Cursor account unchanged. Handlers route this provider for all
+       // three endpoints when "Cursor exclusive" mode kicks in.
+       const path = opts.request?.path || "";
+       const responseFormat = path.includes("/v1/messages")
+         ? "anthropic-messages"
+diff --git a/src/server.ts b/src/server.ts
+index 8ab8bb4..3e1f61a 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -5,20 +5,21 @@ import { extractApiKey, hashApiKey } from "./utils/common";
+ import {
+   createChatCompletionsHandler,
+   createResponsesCompactHandler,
+   createResponsesHandler,
+ } from "./handlers/openai";
+ import {
+   createMessagesHandler,
+   createCountTokensHandler,
+ } from "./handlers/anthropic";
+ import { StatsRecorder } from "./stats/recorder";
++import { createBrowserOAuthHandler } from "./auth/browser-oauth";
+ 
+ // Simple in-memory rate limiter per IP
+ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+ const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+ const RATE_LIMIT_MAX = 60;
+ 
+ function rateLimit(ip: string): boolean {
+   const now = Date.now();
+   const entry = rateLimitMap.get(ip);
+   if (!entry || now > entry.resetAt) {
+@@ -180,20 +181,28 @@ export function createServer(
+         recordStats({
+           status: "failure",
+           statusCode: 499,
+           failureKind: "client_disconnect",
+         });
+       }
+     });
+     next();
+   };
+ 
++  const startProviderRuntime = (providerId: "anthropic" | "codex") => {
++    const provider = registry.get(providerId);
++    if (provider.manager.accountCount > 0) {
++      provider.manager.startAutoRefresh();
++      provider.manager.startStatsLogger();
++    }
++  };
++
+   // Health check (no account count to avoid info leak)
+   app.get("/health", (_req, res) => {
+     res.json({ status: "ok" });
+   });
+ 
+   app.use("/admin", requireApiKey);
+   app.use("/admin", statsFinishMiddleware);
+ 
+   // GET /admin/stats — three-axis aggregated call statistics.
+   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
+@@ -240,20 +249,38 @@ export function createServer(
+       } catch (err: any) {
+         reloaded[p.id] = { error: err?.message || String(err) };
+       }
+     }
+     res.json({
+       reloaded,
+       generated_at: new Date().toISOString(),
+     });
+   });
+ 
++  app.get(
++    "/v1/claude-auth",
++    createBrowserOAuthHandler({
++      provider: registry.get("anthropic"),
++      displayName: "Claude",
++      onAccountAdded: () => startProviderRuntime("anthropic"),
++    }),
++  );
++
++  app.get(
++    "/v1/codex-auth",
++    createBrowserOAuthHandler({
++      provider: registry.get("codex"),
++      displayName: "Codex",
++      onAccountAdded: () => startProviderRuntime("codex"),
++    }),
++  );
++
+   app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
+   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
+   app.get("/v1/models", async (_req, res) => {
+     const created = Math.floor(Date.now() / 1000);
+     const providers = registry.withAccounts();
+     const lists = await Promise.all(providers.map((p) => p.listModels()));
+     const data = lists.flatMap((models) =>
+       models.map((m) => ({
+         id: m.id,
+         object: "model",
+diff --git a/src/upstream/cursor-api.ts b/src/upstream/cursor-api.ts
+index 423f328..5065813 100644
+--- a/src/upstream/cursor-api.ts
++++ b/src/upstream/cursor-api.ts
+@@ -68,21 +68,24 @@ export type CursorTransport = (
+ let cursorTransport: CursorTransport = http2Post;
+ 
+ /** Test-only: replace the HTTP/2 transport. Production code should not call this. */
+ export function __setCursorTransport(transport: CursorTransport | null): void {
+   cursorTransport = transport ?? http2Post;
+ }
+ 
+ function bodyToReadableStream(
+   body: ReadableStream<Uint8Array> | Uint8Array | Buffer,
+ ): ReadableStream<Uint8Array> {
+-  if (body && typeof (body as ReadableStream<Uint8Array>).getReader === "function") {
++  if (
++    body &&
++    typeof (body as ReadableStream<Uint8Array>).getReader === "function"
++  ) {
+     return body as ReadableStream<Uint8Array>;
+   }
+   const bytes =
+     body instanceof Uint8Array
+       ? body
+       : new Uint8Array(body as unknown as ArrayBuffer);
+   return new ReadableStream<Uint8Array>({
+     start(controller) {
+       if (bytes.length > 0) controller.enqueue(bytes);
+       controller.close();
+@@ -104,21 +107,22 @@ function http2Post(
+   body: Buffer,
+   timeoutMs: number,
+   signal?: AbortSignal,
+ ): Promise<Http2Result> {
+   return new Promise((resolve, reject) => {
+     const parsed = new URL(url);
+     const client = http2.connect(parsed.origin);
+     let headersResolved = false;
+     let status = 0;
+     const responseHeaders: Record<string, string> = {};
+-    let bodyController: ReadableStreamDefaultController<Uint8Array> | null = null;
++    let bodyController: ReadableStreamDefaultController<Uint8Array> | null =
++      null;
+     let bodyClosed = false;
+ 
+     const closeBody = (err?: Error) => {
+       if (bodyClosed) return;
+       bodyClosed = true;
+       try {
+         if (err && bodyController) bodyController.error(err);
+         else bodyController?.close();
+       } catch {
+         /* controller already closed */
+@@ -253,31 +257,37 @@ function concatBytes(parts: ArrayLike<number>[]): Uint8Array {
+     out.set(part, offset);
+     offset += part.length;
+   }
+   return out;
+ }
+ 
+ function encodeVarintField(field: number, value: number): Uint8Array {
+   return concatBytes([encodeVarint((field << 3) | 0), encodeVarint(value)]);
+ }
+ 
+-function encodeBytesField(field: number, value: Uint8Array | string): Uint8Array {
++function encodeBytesField(
++  field: number,
++  value: Uint8Array | string,
++): Uint8Array {
+   const payload =
+     typeof value === "string" ? new TextEncoder().encode(value) : value;
+   return concatBytes([
+     encodeVarint((field << 3) | 2),
+     encodeVarint(payload.length),
+     payload,
+   ]);
+ }
+ 
+-function encodeField(field: number, value: string | number | Uint8Array): Uint8Array {
++function encodeField(
++  field: number,
++  value: string | number | Uint8Array,
++): Uint8Array {
+   if (typeof value === "number") return encodeVarintField(field, value);
+   return encodeBytesField(field, value);
+ }
+ 
+ function encodeMessage(fields: ProtoField[]): Uint8Array {
+   return concatBytes(fields.map((f) => encodeField(f.field, f.value)));
+ }
+ 
+ function connectFrame(payload: Uint8Array): Uint8Array {
+   const frame = new Uint8Array(5 + payload.length);
+@@ -369,24 +379,21 @@ export function __resolveCursorModel(model: string): string {
+   return normaliseModel(model);
+ }
+ 
+ interface ChatMessageInput {
+   role: "user" | "assistant" | "system";
+   content: string;
+ }
+ 
+ function messagesFromBody(body: any): ChatMessageInput[] {
+   const collected: ChatMessageInput[] = [];
+-  const pushText = (
+-    role: ChatMessageInput["role"],
+-    raw: unknown,
+-  ): void => {
++  const pushText = (role: ChatMessageInput["role"], raw: unknown): void => {
+     if (typeof raw === "string") {
+       const trimmed = raw.trim();
+       if (trimmed) collected.push({ role, content: raw });
+       return;
+     }
+     if (Array.isArray(raw)) {
+       const text = raw
+         .map((part: any) => part?.text || part?.input_text || "")
+         .filter(Boolean)
+         .join("\n");
+@@ -468,21 +475,24 @@ function encodeCursorSetting(): Uint8Array {
+     encodeBytesField(6, unknown6),
+     encodeVarintField(8, 1),
+     encodeVarintField(9, 1),
+   ]);
+ }
+ 
+ function encodeMetadata(): Uint8Array {
+   // Reverse-engineered Metadata fields. Keep static so cloaking decisions stay
+   // visible at a single configuration point and not rotated per request.
+   return concatBytes([
+-    encodeBytesField(1, process.platform === "win32" ? "windows" : process.platform),
++    encodeBytesField(
++      1,
++      process.platform === "win32" ? "windows" : process.platform,
++    ),
+     encodeBytesField(2, process.arch),
+     encodeBytesField(3, process.version.replace(/^v/, "")),
+     encodeBytesField(4, process.execPath),
+     encodeBytesField(5, new Date().toISOString()),
+   ]);
+ }
+ 
+ interface CursorRequestEncoding {
+   bytes: Uint8Array;
+   prompt: string;
+@@ -538,21 +548,24 @@ export function encodeCursorChatRequest(body: any): CursorRequestEncoding {
+     encodeVarintField(48, 0),
+     encodeVarintField(49, 0),
+     encodeVarintField(51, 0),
+     encodeVarintField(53, 1),
+     encodeBytesField(54, "agent"),
+   ]);
+ 
+   const wrapped = encodeBytesField(1, request);
+   return {
+     bytes: connectFrame(wrapped),
+-    prompt: messages.map((m) => m.content).join("\n").trim(),
++    prompt: messages
++      .map((m) => m.content)
++      .join("\n")
++      .trim(),
+     conversationId,
+   };
+ }
+ 
+ function sha256Hex(input: string): string {
+   return createHash("sha256").update(input).digest("hex");
+ }
+ 
+ const URL_SAFE_BASE64 =
+   "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+@@ -560,21 +573,22 @@ const URL_SAFE_BASE64 =
+ function jyhEncode(bytes: Uint8Array): string {
+   // Jyh cipher used by Cursor's desktop client; see cursor_api_demo TASK-18.
+   // We replicate it byte-for-byte so api2.cursor.sh accepts our checksum.
+   let out = "";
+   for (let i = 0; i < bytes.length; i += 3) {
+     const a = bytes[i];
+     const b = i + 1 < bytes.length ? bytes[i + 1] : 0;
+     const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
+     out += URL_SAFE_BASE64[a >> 2];
+     out += URL_SAFE_BASE64[((a & 3) << 4) | (b >> 4)];
+-    if (i + 1 < bytes.length) out += URL_SAFE_BASE64[((b & 15) << 2) | (c >> 6)];
++    if (i + 1 < bytes.length)
++      out += URL_SAFE_BASE64[((b & 15) << 2) | (c >> 6)];
+     if (i + 2 < bytes.length) out += URL_SAFE_BASE64[c & 63];
+   }
+   return out;
+ }
+ 
+ function buildCursorChecksum(token: string, machineId: string): string {
+   const stableMachineId = machineId || sha256Hex(`${token}machineId`);
+   const timestamp = Math.floor(Date.now() / 1_000_000);
+   const buf = Uint8Array.from([
+     (timestamp >>> 40) & 0xff,
+@@ -592,21 +606,23 @@ function buildCursorChecksum(token: string, machineId: string): string {
+   return `${jyhEncode(buf)}${stableMachineId}`;
+ }
+ 
+ export function __buildCursorHeaders(
+   account: AvailableAccount,
+   config: Config,
+ ): Record<string, string> {
+   const cursor = config.cloaking.cursor || {};
+   const token = account.token.accessToken;
+   const machineId =
+-    account.token.cursorServiceMachineId || account.accountUuid || account.deviceId;
++    account.token.cursorServiceMachineId ||
++    account.accountUuid ||
++    account.deviceId;
+   const clientVersion =
+     cursor["client-version"] ||
+     account.token.cursorClientVersion ||
+     DEFAULT_CURSOR_CLIENT_VERSION;
+   const configVersion =
+     cursor["config-version"] || account.token.cursorConfigVersion || uuidv4();
+   const sessionId = uuidv5(token, UUID_DNS_NAMESPACE);
+   const clientKey = sha256Hex(token);
+ 
+   return {
+@@ -624,21 +640,23 @@ export function __buildCursorHeaders(
+     "x-cursor-client-os":
+       process.platform === "darwin"
+         ? "macos"
+         : process.platform === "win32"
+           ? "windows"
+           : "linux",
+     "x-cursor-client-arch": process.arch,
+     "x-cursor-client-device-type": "desktop",
+     "x-cursor-config-version": configVersion,
+     "x-cursor-timezone":
+-      cursor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
++      cursor.timezone ||
++      Intl.DateTimeFormat().resolvedOptions().timeZone ||
++      "UTC",
+     "x-ghost-mode": cursor["ghost-mode"] || "true",
+     "x-session-id": sessionId,
+     "x-request-id": uuidv4(),
+   };
+ }
+ 
+ function decodeVarint(data: Uint8Array, pos: number): [number, number] {
+   let value = 0;
+   let shift = 0;
+   while (pos < data.length) {
+@@ -680,21 +698,24 @@ function parseFields(data: Uint8Array): ProtoFieldRaw[] {
+       pos += 8;
+     } else if (wireType === 5) {
+       pos += 4;
+     } else {
+       break;
+     }
+   }
+   return out;
+ }
+ 
+-function getFieldBytes(fields: ProtoFieldRaw[], field: number): Uint8Array | undefined {
++function getFieldBytes(
++  fields: ProtoFieldRaw[],
++  field: number,
++): Uint8Array | undefined {
+   return fields.find((f) => f.field === field && f.wireType === 2)?.bytes;
+ }
+ 
+ interface CursorFrame {
+   type: number;
+   payload: Uint8Array;
+ }
+ 
+ export interface CursorDecodeResult {
+   text: string;
+@@ -755,21 +776,23 @@ function looksLikeProtoStart(byte: number): boolean {
+ 
+ function extractInnerText(payload: Uint8Array, depth = 0): string {
+   // Walk the inner StreamUnifiedChatResponse-shaped message and pull any
+   // field=1 length-delimited string. Used for both text and reasoning.
+   if (depth > 4) return "";
+   const fields = parseFields(payload);
+   const candidate = fields.find(
+     (f) => f.field === 1 && f.wireType === 2 && f.bytes !== undefined,
+   );
+   if (candidate?.bytes) {
+-    const text = new TextDecoder("utf-8", { fatal: false }).decode(candidate.bytes);
++    const text = new TextDecoder("utf-8", { fatal: false }).decode(
++      candidate.bytes,
++    );
+     if (isUtfPrintable(text) && !isUuidLike(text.trim())) return text;
+   }
+   let acc = "";
+   for (const f of fields) {
+     if (f.wireType === 2 && f.bytes && f.bytes.length > 1) {
+       if (!looksLikeProtoStart(f.bytes[0])) continue;
+       try {
+         acc += extractInnerText(f.bytes, depth + 1);
+       } catch {
+         /* ignore */
+@@ -906,21 +929,24 @@ export function createCursorStreamingDecoder(): CursorStreamingDecoder {
+     if (resolved !== "none" || !pendingReasoning) return null;
+     const m = pendingReasoning.match(THINK_CLOSE_RE);
+     if (!m || m.index === undefined) return null;
+     const reasoningPart = pendingReasoning.slice(0, m.index);
+     const textPart = pendingReasoning.slice(m.index + m[0].length);
+     pendingReasoning = "";
+     resolved = "split";
+     return { reasoningDelta: reasoningPart, textDelta: textPart };
+   }
+ 
+-  function flushReasoning(): { reasoningDelta: string; textDelta: string } | null {
++  function flushReasoning(): {
++    reasoningDelta: string;
++    textDelta: string;
++  } | null {
+     if (!pendingReasoning) return null;
+     const out = { reasoningDelta: pendingReasoning, textDelta: "" };
+     pendingReasoning = "";
+     resolved = "reasoning";
+     return out;
+   }
+ 
+   return {
+     feed(chunk: Uint8Array) {
+       const merged = new Uint8Array(buffer.length + chunk.length);
+@@ -961,23 +987,25 @@ export function createCursorStreamingDecoder(): CursorStreamingDecoder {
+               const split = maybeSplit();
+               if (split) {
+                 reasoningDelta += split.reasoningDelta;
+                 textDelta = split.textDelta + textDelta;
+               }
+             }
+           }
+           if (textDelta && resolved === "none") {
+             // First real text delta — commit any pending reasoning as-is.
+             const flushed = flushReasoning();
+-            if (flushed) reasoningDelta = flushed.reasoningDelta + reasoningDelta;
++            if (flushed)
++              reasoningDelta = flushed.reasoningDelta + reasoningDelta;
+           }
+-          if (textDelta || reasoningDelta) out.push({ textDelta, reasoningDelta });
++          if (textDelta || reasoningDelta)
++            out.push({ textDelta, reasoningDelta });
+         } else if (type === 2 || type === 3) {
+           const err = extractJsonError(payload);
+           if (err) error = err;
+         }
+       }
+       buffer = buffer.slice(pos);
+       return out;
+     },
+     finish() {
+       return { error };
+@@ -988,21 +1016,24 @@ export function createCursorStreamingDecoder(): CursorStreamingDecoder {
+       return { reasoningDelta: flushed?.reasoningDelta || "" };
+     },
+   } as CursorStreamingDecoder & { drain(): { reasoningDelta: string } };
+ }
+ 
+ interface ResponsesSseOptions {
+   text: string;
+   reasoning?: string;
+ }
+ 
+-function buildResponsesCompletedSse(model: string, opts: ResponsesSseOptions): string {
++function buildResponsesCompletedSse(
++  model: string,
++  opts: ResponsesSseOptions,
++): string {
+   const id = `resp_${uuidv4().replace(/-/g, "")}`;
+   const created = Math.floor(Date.now() / 1000);
+   const reasoningContent =
+     opts.reasoning && opts.reasoning.trim()
+       ? [
+           {
+             type: "reasoning",
+             summary: [{ type: "summary_text", text: opts.reasoning }],
+           },
+         ]
+@@ -1101,23 +1132,25 @@ async function cursorUpstreamToSse(
+     while (true) {
+       const { value, done } = await reader!.read();
+       if (done) break;
+       const deltas = decoder.feed(value);
+       for (const d of deltas) {
+         if (d.reasoningDelta) aggregatedReasoning += d.reasoningDelta;
+         if (d.textDelta) aggregatedText += d.textDelta;
+         yield d;
+       }
+     }
+-    const drained = (decoder as CursorStreamingDecoder & {
+-      drain(): { reasoningDelta: string };
+-    }).drain();
++    const drained = (
++      decoder as CursorStreamingDecoder & {
++        drain(): { reasoningDelta: string };
++      }
++    ).drain();
+     if (drained.reasoningDelta) {
+       aggregatedReasoning += drained.reasoningDelta;
+       yield { reasoningDelta: drained.reasoningDelta, textDelta: "" };
+     }
+     const fin = decoder.finish();
+     yield {
+       __done: true,
+       aggregatedText,
+       aggregatedReasoning,
+       error: fin.error,
+@@ -1228,24 +1261,26 @@ async function* openaiResponsesGenerator(
+           total_tokens: 0,
+           input_tokens_details: { cached_tokens: 0 },
+           output_tokens_details: { reasoning_tokens: 0 },
+         },
+       };
+       yield `event: response.completed\ndata: ${JSON.stringify({ type: "response.completed", response: completed })}\n\n`;
+       yield "data: [DONE]\n\n";
+       return;
+     }
+     if (item.reasoningDelta) {
+-      yield `event: response.reasoning_summary_text.delta\ndata: ${JSON.stringify({
+-        type: "response.reasoning_summary_text.delta",
+-        delta: item.reasoningDelta,
+-      })}\n\n`;
++      yield `event: response.reasoning_summary_text.delta\ndata: ${JSON.stringify(
++        {
++          type: "response.reasoning_summary_text.delta",
++          delta: item.reasoningDelta,
++        },
++      )}\n\n`;
+     }
+     if (item.textDelta) {
+       yield `event: response.output_text.delta\ndata: ${JSON.stringify({
+         type: "response.output_text.delta",
+         delta: item.textDelta,
+       })}\n\n`;
+     }
+   }
+ }
+ 
+@@ -1376,21 +1411,24 @@ async function* anthropicMessagesGenerator(
+  * The stream ends with the OpenAI-required `data: [DONE]\n\n` sentinel.
+  */
+ async function* openaiChatCompletionsGenerator(
+   model: string,
+   src: AsyncGenerator<DeltaItem>,
+ ): AsyncGenerator<string> {
+   const id = `chatcmpl-${uuidv4().replace(/-/g, "").slice(0, 24)}`;
+   const created = Math.floor(Date.now() / 1000);
+   const fingerprint = `fp_${uuidv4().replace(/-/g, "").slice(0, 12)}`;
+ 
+-  const chunk = (delta: Record<string, unknown>, finishReason: string | null = null) => {
++  const chunk = (
++    delta: Record<string, unknown>,
++    finishReason: string | null = null,
++  ) => {
+     const payload = {
+       id,
+       object: "chat.completion.chunk",
+       created,
+       model,
+       system_fingerprint: fingerprint,
+       choices: [
+         { index: 0, delta, finish_reason: finishReason, logprobs: null },
+       ],
+     };
+@@ -1552,21 +1590,23 @@ function errorResponse(message: string): Response {
+ 
+ export function normalizeCursorResponsesBody(body: any): any {
+   if (!body || typeof body !== "object") return body;
+   return { ...body, stream: true };
+ }
+ 
+ export async function callCursorResponses(
+   options: CallCursorResponsesOptions,
+ ): Promise<Response> {
+   const { account, config } = options;
+-  const body = normalizeCursorResponsesBody(options.body ?? options.request.body);
++  const body = normalizeCursorResponsesBody(
++    options.body ?? options.request.body,
++  );
+   // Cursor's chat is reverse-engineered to live at api2.cursor.sh. We expose
+   // both legacy "agent-base-url" and "api-base-url" config keys so users can
+   // override the host without forcing a code change.
+   const baseUrl =
+     config.cloaking.cursor?.["agent-base-url"] ||
+     config.cloaking.cursor?.["api-base-url"] ||
+     DEFAULT_API_BASE_URL;
+   const url = `${baseUrl}${CHAT_PATH}`;
+   const totalTimeoutMs = config.timeouts["stream-messages-ms"];
+   // Header-arrival timer inside the transport is a *separate* shorter
+@@ -1637,25 +1677,29 @@ export async function listCursorModels(
+       method: "POST",
+       headers: {
+         ...__buildCursorHeaders(account, cfg),
+         "Content-Type": "application/json",
+         Accept: "application/json",
+       },
+       body: "{}",
+       signal: AbortSignal.timeout(10_000),
+     });
+     if (!resp.ok) throw new Error(`status ${resp.status}`);
+-    const parsed = (await resp.json()) as { models?: Array<Record<string, unknown>> };
++    const parsed = (await resp.json()) as {
++      models?: Array<Record<string, unknown>>;
++    };
+     const ids = extractCursorModelIds(parsed);
+     if (ids.length) return ids.map((id) => ({ id, owned_by: "cursor" }));
+   } catch (err: any) {
+-    console.error(`[cursor] AvailableModels failed: ${err?.message || String(err)}`);
++    console.error(
++      `[cursor] AvailableModels failed: ${err?.message || String(err)}`,
++    );
+   }
+   return FALLBACK_MODELS.map((id) => ({ id, owned_by: "cursor" }));
+ }
+ 
+ /**
+  * Pull model IDs out of a Cursor `AvailableModels` response.
+  *
+  * The response is a single object whose top-level `models` array is the
+  * source of truth — each entry is `{ name, serverModelName, ... }`. Earlier
+  * we ran a regex over the JSON-serialised payload, which incorrectly
+@@ -1671,22 +1715,22 @@ export function extractCursorModelIds(parsed: unknown): string[] {
+   if (!Array.isArray(root.models)) return [];
+   const seen = new Set<string>();
+   const out: string[] = [];
+   for (const entry of root.models) {
+     if (!entry || typeof entry !== "object") continue;
+     const e = entry as Record<string, unknown>;
+     const candidate =
+       typeof e.serverModelName === "string"
+         ? e.serverModelName
+         : typeof e.name === "string"
+-        ? e.name
+-        : "";
++          ? e.name
++          : "";
+     const trimmed = candidate.trim();
+     if (!trimmed) continue;
+     // Drop placeholder enum values and obviously invalid identifiers.
+     if (
+       /^DEGRADATION_/i.test(trimmed) ||
+       /[A-Z]{3,}_[A-Z]/.test(trimmed) ||
+       !/^[a-z0-9._/-]{1,64}$/i.test(trimmed)
+     ) {
+       continue;
+     }
+diff --git a/src/upstream/responses-translator.ts b/src/upstream/responses-translator.ts
+index 1a778c1..23a99da 100644
+--- a/src/upstream/responses-translator.ts
++++ b/src/upstream/responses-translator.ts
+@@ -84,21 +84,24 @@ export function applyCodexReasoningDefault(
+  * non-streaming aggregation paths need. Centralised here so the
+  * `readSseEvents` flush invariants (decoder flush, leftover line
+  * consumption) are applied uniformly to chat completions, messages and
+  * the responses passthrough — previously each handler had its own
+  * hand-rolled drain loop and they could each silently drop a final
+  * un-terminated `data:` line containing `response.completed`.
+  */
+ export async function drainCodexResponsesSse(
+   upstream: Response,
+ ): Promise<DrainedCodexResponses> {
+-  const toolCalls = new Map<string, { id: string; name: string; args: string }>();
++  const toolCalls = new Map<
++    string,
++    { id: string; name: string; args: string }
++  >();
+   // codex `function_call_arguments.delta` events reference the parent
+   // item by `item_id` (the internal `fc_…` id), not by `call_id` (the
+   // public `call_…` id we key `toolCalls` by). Track the mapping
+   // separately so subsequent argument deltas can find their slot
+   // without polluting `toolCalls.values()` with duplicates.
+   const itemIdToCallId = new Map<string, string>();
+   const outputItems: any[] = [];
+   let textOut = "";
+   let reasoningOut = "";
+   let completedResponse: any = null;
+@@ -268,21 +271,25 @@ export function chatToResponsesRequest(body: any): any {
+         type: "function_call_output",
+         call_id: msg.tool_call_id,
+         output:
+           typeof msg.content === "string"
+             ? msg.content
+             : JSON.stringify(msg.content),
+       });
+       continue;
+     }
+ 
+-    if (role === "assistant" && Array.isArray(msg.tool_calls) && msg.tool_calls.length) {
++    if (
++      role === "assistant" &&
++      Array.isArray(msg.tool_calls) &&
++      msg.tool_calls.length
++    ) {
+       const text = extractText(msg.content);
+       if (text) {
+         inputItems.push({
+           role: "assistant",
+           content: [{ type: "output_text", text }],
+         });
+       }
+       for (const [toolCallIndex, tc] of msg.tool_calls.entries()) {
+         inputItems.push({
+           type: "function_call",
+@@ -296,21 +303,22 @@ export function chatToResponsesRequest(body: any): any {
+       }
+       continue;
+     }
+ 
+     // Plain user / assistant / function (legacy) message.
+     if (typeof msg.content === "string") {
+       inputItems.push({ role, content: msg.content });
+     } else if (Array.isArray(msg.content)) {
+       const parts = msg.content
+         .map((part: any) => {
+-          if (typeof part === "string") return { type: "input_text", text: part };
++          if (typeof part === "string")
++            return { type: "input_text", text: part };
+           if (part?.type === "text") {
+             return {
+               type: role === "assistant" ? "output_text" : "input_text",
+               text: part.text,
+             };
+           }
+           if (part?.type === "image_url" && part.image_url?.url) {
+             return { type: "input_image", image_url: part.image_url.url };
+           }
+           if (part?.type === "input_text" || part?.type === "output_text") {
+@@ -613,23 +621,21 @@ function buildChatChunk(
+   state: ResponsesToChatState,
+   delta: Record<string, unknown>,
+   finishReason: string | null = null,
+ ): string {
+   const payload = {
+     id: state.id,
+     object: "chat.completion.chunk",
+     created: state.created,
+     model: state.model,
+     system_fingerprint: state.fingerprint,
+-    choices: [
+-      { index: 0, delta, finish_reason: finishReason, logprobs: null },
+-    ],
++    choices: [{ index: 0, delta, finish_reason: finishReason, logprobs: null }],
+   };
+   return `data: ${JSON.stringify(payload)}\n\n`;
+ }
+ 
+ function ensureRolePrimer(state: ResponsesToChatState): string[] {
+   if (state.rolePrimerSent) return [];
+   state.rolePrimerSent = true;
+   return [buildChatChunk(state, { role: "assistant", content: "" })];
+ }
+ 
+diff --git a/tests/browser-oauth.test.ts b/tests/browser-oauth.test.ts
+new file mode 100644
+index 0000000..28fad71
+--- /dev/null
++++ b/tests/browser-oauth.test.ts
+@@ -0,0 +1,550 @@
++import test from "node:test";
++import assert from "node:assert/strict";
++import http, { createServer as createHttpServer } from "node:http";
++import os from "node:os";
++import path from "node:path";
++import fs from "node:fs";
++import { AddressInfo } from "node:net";
++import express from "express";
++
++import { Config } from "../src/config";
++import {
++  createBrowserOAuthHandler,
++  isLoopbackRequest,
++} from "../src/auth/browser-oauth";
++import { AccountManager } from "../src/accounts/manager";
++import { createServer } from "../src/server";
++import { startServer } from "../src/index";
++import { buildRegistry, ProviderRegistry } from "../src/providers/registry";
++import { loadAllTokens } from "../src/auth/token-storage";
++import { TokenData } from "../src/auth/types";
++
++function makeConfig(authDir: string): Config {
++  return {
++    host: "127.0.0.1",
++    port: 0,
++    "auth-dir": authDir,
++    "api-keys": new Set(["test-key"]),
++    "body-limit": "200mb",
++    cloaking: {
++      "cli-version": "2.1.88",
++      entrypoint: "cli",
++    },
++    timeouts: {
++      "messages-ms": 120000,
++      "stream-messages-ms": 600000,
++      "count-tokens-ms": 30000,
++    },
++    stats: { enabled: false },
++    reasoning: {},
++    debug: "off",
++  };
++}
++
++async function startApp(config: Config): Promise<{
++  server: http.Server;
++  registry: ProviderRegistry;
++}> {
++  const registry = buildRegistry(config["auth-dir"]);
++  for (const provider of registry.all()) provider.manager.load();
++  const app = createServer(config, registry);
++  const server = createHttpServer(app);
++  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
++  return { server, registry };
++}
++
++async function stopApp(server: http.Server): Promise<void> {
++  await new Promise<void>((resolve, reject) => {
++    server.close((err) => {
++      if (err) reject(err);
++      else resolve();
++    });
++  });
++}
++
++async function occupyPort(host: string, port: number): Promise<http.Server> {
++  const server = createHttpServer((_req, res) => {
++    res.writeHead(204);
++    res.end();
++  });
++  await new Promise<void>((resolve, reject) => {
++    server.once("error", reject);
++    server.listen(port, host, resolve);
++  });
++  return server;
++}
++
++function serverAddress(server: http.Server): AddressInfo {
++  const address = server.address();
++  if (!address || typeof address === "string") {
++    throw new Error("Server is not listening on a TCP port");
++  }
++  return address;
++}
++
++async function request(options: {
++  server: http.Server;
++  method: string;
++  path: string;
++  headers?: Record<string, string>;
++}): Promise<{
++  status: number;
++  headers: http.IncomingHttpHeaders;
++  body: string;
++}> {
++  const address = serverAddress(options.server);
++  return new Promise((resolve, reject) => {
++    const req = http.request(
++      {
++        host: "127.0.0.1",
++        port: address.port,
++        method: options.method,
++        path: options.path,
++        headers: {
++          Connection: "close",
++          ...(options.headers || {}),
++        },
++      },
++      (res) => {
++        let body = "";
++        res.setEncoding("utf8");
++        res.on("data", (chunk) => {
++          body += chunk;
++        });
++        res.on("end", () =>
++          resolve({
++            status: res.statusCode || 0,
++            headers: res.headers,
++            body,
++          }),
++        );
++      },
++    );
++    req.on("error", reject);
++    req.end();
++  });
++}
++
++async function getOnce(url: string): Promise<{
++  status: number;
++  body: string;
++}> {
++  return new Promise((resolve, reject) => {
++    http
++      .get(
++        url,
++        {
++          headers: {
++            Connection: "close",
++          },
++        },
++        (res) => {
++          const chunks: Buffer[] = [];
++          res.on("data", (c) => chunks.push(Buffer.from(c)));
++          res.on("end", () =>
++            resolve({
++              status: res.statusCode || 0,
++              body: Buffer.concat(chunks).toString("utf8"),
++            }),
++          );
++        },
++      )
++      .on("error", reject);
++  });
++}
++
++async function waitForBrowserOAuthCleanup(): Promise<void> {
++  await new Promise((resolve) => setTimeout(resolve, 25));
++}
++
++function stubProviderExchange(
++  registry: ProviderRegistry,
++  providerId: "anthropic" | "codex",
++  token: TokenData,
++): void {
++  const provider = registry.get(providerId);
++  provider.exchangeCode = async (code, returnedState, expectedState) => {
++    if (returnedState !== expectedState) {
++      throw new Error("OAuth state mismatch — possible CSRF attack");
++    }
++    assert.equal(code, "auth-code");
++    return token;
++  };
++}
++
++test("isLoopbackRequest allows local callers and rejects remote callers", () => {
++  assert.equal(
++    isLoopbackRequest({
++      socket: { remoteAddress: "::ffff:127.0.0.1" },
++    } as any),
++    true,
++  );
++  assert.equal(
++    isLoopbackRequest({
++      ip: "::ffff:127.0.0.1",
++      socket: { remoteAddress: "203.0.113.10" },
++    } as any),
++    false,
++  );
++});
++
++test("AccountManager timer starters are idempotent", (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  t.after(() => {
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++  const manager = new AccountManager(authDir, {
++    provider: "codex",
++    refresh: async () => {
++      throw new Error("refresh should not run when no accounts exist");
++    },
++  });
++  t.after(() => {
++    manager.stopAutoRefresh();
++    manager.stopStatsLogger();
++  });
++
++  manager.startAutoRefresh();
++  const firstRefreshTimer = (manager as any).refreshTimer;
++  assert.ok(firstRefreshTimer);
++  manager.startAutoRefresh();
++  assert.equal((manager as any).refreshTimer, firstRefreshTimer);
++
++  manager.startStatsLogger();
++  const firstStatsTimer = (manager as any).statsTimer;
++  assert.ok(firstStatsTimer);
++  manager.startStatsLogger();
++  assert.equal((manager as any).statsTimer, firstStatsTimer);
++});
++
++test("GET /v1/claude-auth redirects to Claude OAuth without API key", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const resp = await request({
++    server,
++    method: "GET",
++    path: "/v1/claude-auth",
++  });
++
++  assert.equal(resp.status, 302);
++  const location = String(resp.headers.location || "");
++  const parsed = new URL(location);
++  assert.equal(parsed.origin, "https://claude.ai");
++  assert.equal(parsed.pathname, "/oauth/authorize");
++  assert.equal(
++    parsed.searchParams.get("redirect_uri"),
++    "http://localhost:54545/callback",
++  );
++  const state = parsed.searchParams.get("state");
++  assert.ok(state);
++  await getOnce(
++    `http://127.0.0.1:54545/callback?error=access_denied&state=${state}`,
++  );
++  await waitForBrowserOAuthCleanup();
++});
++
++test("GET /v1/codex-auth redirects to Codex OAuth without API key", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const resp = await request({
++    server,
++    method: "GET",
++    path: "/v1/codex-auth",
++  });
++
++  assert.equal(resp.status, 302);
++  const location = String(resp.headers.location || "");
++  const parsed = new URL(location);
++  assert.equal(parsed.origin, "https://auth.openai.com");
++  assert.equal(parsed.pathname, "/oauth/authorize");
++  assert.equal(
++    parsed.searchParams.get("redirect_uri"),
++    "http://localhost:1455/auth/callback",
++  );
++  const state = parsed.searchParams.get("state");
++  assert.ok(state);
++  await getOnce(
++    `http://127.0.0.1:1455/auth/callback?error=access_denied&state=${state}`,
++  );
++  await waitForBrowserOAuthCleanup();
++});
++
++test("Claude browser OAuth callback persists token and updates live manager", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const config = makeConfig(authDir);
++  const { server, registry } = await startApp(config);
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  stubProviderExchange(registry, "anthropic", {
++    accessToken: "claude-access",
++    refreshToken: "claude-refresh",
++    email: "claude@example.com",
++    expiresAt: "2030-01-01T00:00:00.000Z",
++    accountUuid: "claude-uuid",
++    provider: "anthropic",
++  });
++
++  const start = await request({
++    server,
++    method: "GET",
++    path: "/v1/claude-auth",
++  });
++  assert.equal(start.status, 302);
++  const authUrl = new URL(String(start.headers.location));
++  const state = authUrl.searchParams.get("state");
++  assert.ok(state);
++
++  const callback = await getOnce(
++    `http://127.0.0.1:54545/callback?code=auth-code&state=${state}`,
++  );
++  assert.equal(callback.status, 200);
++  assert.match(callback.body, /Claude Login Successful/);
++  await waitForBrowserOAuthCleanup();
++
++  const tokens = loadAllTokens(authDir, "anthropic");
++  assert.equal(tokens.length, 1);
++  assert.equal(tokens[0].email, "claude@example.com");
++  assert.equal(registry.get("anthropic").manager.accountCount, 1);
++});
++
++test("Codex browser OAuth callback persists token and updates live manager", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const config = makeConfig(authDir);
++  const { server, registry } = await startApp(config);
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  stubProviderExchange(registry, "codex", {
++    accessToken: "codex-access",
++    refreshToken: "codex-refresh",
++    email: "codex@example.com",
++    expiresAt: "2030-01-01T00:00:00.000Z",
++    accountUuid: "chatgpt-account",
++    provider: "codex",
++    idToken: "id.jwt.token",
++  });
++
++  const start = await request({
++    server,
++    method: "GET",
++    path: "/v1/codex-auth",
++  });
++  assert.equal(start.status, 302);
++  const authUrl = new URL(String(start.headers.location));
++  const state = authUrl.searchParams.get("state");
++  assert.ok(state);
++
++  const callback = await getOnce(
++    `http://127.0.0.1:1455/auth/callback?code=auth-code&state=${state}`,
++  );
++  assert.equal(callback.status, 200);
++  assert.match(callback.body, /Codex Login Successful/);
++  await waitForBrowserOAuthCleanup();
++
++  const tokens = loadAllTokens(authDir, "codex");
++  assert.equal(tokens.length, 1);
++  assert.equal(tokens[0].email, "codex@example.com");
++  assert.equal(registry.get("codex").manager.accountCount, 1);
++});
++
++test("browser OAuth callback rejects state mismatch without saving token", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server, registry } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  stubProviderExchange(registry, "anthropic", {
++    accessToken: "unused",
++    refreshToken: "unused",
++    email: "unused@example.com",
++    expiresAt: "2030-01-01T00:00:00.000Z",
++    accountUuid: "unused",
++    provider: "anthropic",
++  });
++
++  const start = await request({
++    server,
++    method: "GET",
++    path: "/v1/claude-auth",
++  });
++  assert.equal(start.status, 302);
++
++  const callback = await getOnce(
++    "http://127.0.0.1:54545/callback?code=auth-code&state=wrong-state",
++  );
++  assert.equal(callback.status, 400);
++  assert.match(callback.body, /state mismatch/i);
++  await waitForBrowserOAuthCleanup();
++
++  assert.equal(loadAllTokens(authDir, "anthropic").length, 0);
++  assert.equal(registry.get("anthropic").manager.accountCount, 0);
++});
++
++test("browser OAuth rejects a second in-flight login for the same provider", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const first = await request({
++    server,
++    method: "GET",
++    path: "/v1/codex-auth",
++  });
++  assert.equal(first.status, 302);
++
++  const second = await request({
++    server,
++    method: "GET",
++    path: "/v1/codex-auth",
++  });
++  assert.equal(second.status, 409);
++  assert.match(second.body, /login_in_progress/);
++
++  const authUrl = new URL(String(first.headers.location));
++  const state = authUrl.searchParams.get("state");
++  assert.ok(state);
++  await getOnce(
++    `http://127.0.0.1:1455/auth/callback?error=access_denied&state=${state}`,
++  );
++  await waitForBrowserOAuthCleanup();
++});
++
++test("browser OAuth cleans up partial callback startup failure before retry", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const registry = buildRegistry(authDir);
++  for (const provider of registry.all()) provider.manager.load();
++  const app = express();
++  app.get(
++    "/auth",
++    createBrowserOAuthHandler({
++      provider: registry.get("codex"),
++      displayName: "Codex",
++      timeoutMs: 500,
++    }),
++  );
++  const server = createHttpServer(app);
++  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
++  let blocker: http.Server | undefined = await occupyPort("127.0.0.1", 1455);
++  t.after(async () => {
++    if (blocker) await stopApp(blocker);
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const failedStart = await request({
++    server,
++    method: "GET",
++    path: "/auth",
++  });
++  assert.equal(failedStart.status, 500);
++  assert.match(failedStart.body, /callback_server_start_failed/);
++
++  await stopApp(blocker);
++  blocker = undefined;
++
++  const retry = await request({
++    server,
++    method: "GET",
++    path: "/auth",
++  });
++  assert.equal(retry.status, 302);
++
++  const authUrl = new URL(String(retry.headers.location));
++  const state = authUrl.searchParams.get("state");
++  assert.ok(state);
++  await getOnce(
++    `http://127.0.0.1:1455/auth/callback?error=access_denied&state=${state}`,
++  );
++  await waitForBrowserOAuthCleanup();
++});
++
++test("GET /v1/anthropic-auth is not registered", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const resp = await request({
++    server,
++    method: "GET",
++    path: "/v1/anthropic-auth",
++  });
++
++  assert.equal(resp.status, 401);
++  assert.match(resp.body, /Missing API key/);
++});
++
++test("GET /v1/models still requires API key when no accounts are loaded", async (t) => {
++  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const { server } = await startApp(makeConfig(authDir));
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(authDir, { recursive: true, force: true });
++  });
++
++  const missingKey = await request({
++    server,
++    method: "GET",
++    path: "/v1/models",
++  });
++  assert.equal(missingKey.status, 401);
++
++  const withKey = await request({
++    server,
++    method: "GET",
++    path: "/v1/models",
++    headers: { Authorization: "Bearer test-key" },
++  });
++  assert.equal(withKey.status, 200);
++  assert.deepEqual(JSON.parse(withKey.body), { object: "list", data: [] });
++});
++
++test("startServer starts successfully with zero accounts", async (t) => {
++  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
++  const authDir = path.join(tmp, "auth");
++  const configPath = path.join(tmp, "config.yaml");
++  fs.writeFileSync(
++    configPath,
++    [
++      'host: "127.0.0.1"',
++      "port: 0",
++      `auth-dir: "${authDir}"`,
++      "api-keys:",
++      '  - "test-key"',
++      "stats:",
++      "  enabled: false",
++    ].join("\n"),
++  );
++
++  const server = await startServer([`--config=${configPath}`]);
++  t.after(async () => {
++    await stopApp(server);
++    fs.rmSync(tmp, { recursive: true, force: true });
++  });
++
++  const address = serverAddress(server);
++  assert.equal(typeof address.port, "number");
++  assert.ok(address.port > 0);
++});
+diff --git a/tests/codex.test.ts b/tests/codex.test.ts
+index 2a127d8..676fbe8 100644
+--- a/tests/codex.test.ts
++++ b/tests/codex.test.ts
+@@ -700,24 +700,21 @@ test("normalizeCodexResponsesBody rejects function_call input items with empty n
+             call_id: "call_1",
+             name: "",
+             arguments: "{}",
+           },
+         ],
+       }),
+     (err: any) => {
+       assert.equal(err.name, "ResponsesTranslationError");
+       assert.equal(err.status, 400);
+       assert.equal(err.code, "invalid_tool_call_name");
+-      assert.match(
+-        err.message,
+-        /input\[0\]\.name must be a non-empty string/,
+-      );
++      assert.match(err.message, /input\[0\]\.name must be a non-empty string/);
+       return true;
+     },
+   );
+ });
+ 
+ test("normalizeCodexResponsesBody handles empty/non-object input safely", () => {
+   assert.equal(normalizeCodexResponsesBody(null), null);
+   assert.equal(normalizeCodexResponsesBody(undefined), undefined);
+   assert.equal(
+     normalizeCodexResponsesBody("not an object" as any),
+@@ -1088,21 +1085,24 @@ function makeNotifyConfig(): Config2 {
+     timeouts: {
+       "messages-ms": 1000,
+       "stream-messages-ms": 1000,
+       "count-tokens-ms": 1000,
+     },
+     debug: "off",
+   };
+ }
+ 
+ function withFetchStub(
+-  stub: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
++  stub: (
++    input: string | URL | Request,
++    init?: RequestInit,
++  ) => Promise<Response>,
+ ): () => void {
+   const orig = globalThis.fetch;
+   globalThis.fetch = stub as typeof fetch;
+   return () => {
+     globalThis.fetch = orig;
+   };
+ }
+ 
+ function captureLogs(): {
+   logs: string[];
+@@ -1122,40 +1122,42 @@ function captureLogs(): {
+       console.log = origLog;
+       console.warn = origWarn;
+     },
+   };
+ }
+ 
+ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer", async () => {
+   let seen: { url: string; init?: RequestInit } | null = null;
+   const restoreFetch = withFetchStub(async (input, init) => {
+     seen = { url: String(input), init };
+-    return new Response(
+-      JSON.stringify({ reloaded: {}, generated_at: "now" }),
+-      { status: 200, headers: { "Content-Type": "application/json" } },
+-    );
++    return new Response(JSON.stringify({ reloaded: {}, generated_at: "now" }), {
++      status: 200,
++      headers: { "Content-Type": "application/json" },
++    });
+   });
+   const cap = captureLogs();
+   try {
+     await notifyServerReload(makeNotifyConfig());
+   } finally {
+     cap.restore();
+     restoreFetch();
+   }
+   assert.ok(seen);
+   assert.equal(seen!.url, "http://127.0.0.1:18399/admin/reload");
+   assert.equal(seen!.init?.method, "POST");
+   assert.equal(
+     (seen!.init?.headers as Record<string, string>)?.Authorization,
+     "Bearer sk-test",
+   );
+-  assert.ok(cap.logs.some((l) => l.includes("Notified running auth2api server")));
++  assert.ok(
++    cap.logs.some((l) => l.includes("Notified running auth2api server")),
++  );
+   assert.equal(cap.warns.length, 0);
+ });
+ 
+ test("notifyServerReload silently info-logs on ECONNREFUSED (server not running)", async () => {
+   const restoreFetch = withFetchStub(async () => {
+     const err: any = new TypeError("fetch failed");
+     err.cause = { code: "ECONNREFUSED", message: "connect ECONNREFUSED" };
+     throw err;
+   });
+   const cap = captureLogs();
+diff --git a/tests/cursor.test.ts b/tests/cursor.test.ts
+index 8f2b678..2037040 100644
+--- a/tests/cursor.test.ts
++++ b/tests/cursor.test.ts
+@@ -185,21 +185,23 @@ test("cursor tokens round-trip through auth2api token storage", () => {
+       email: "cursor@example.com",
+       expiresAt: "2030-01-01T00:00:00.000Z",
+       accountUuid: "machine-id",
+       provider: "cursor",
+       cursorServiceMachineId: "machine-id",
+       cursorClientVersion: "cli-test",
+       cursorConfigVersion: "config-test",
+       cursorClientId: CURSOR_CLIENT_ID,
+       cursorMembershipType: "pro",
+     });
+-    assert.deepEqual(fs.readdirSync(tmpDir), ["cursor-cursor@example.com.json"]);
++    assert.deepEqual(fs.readdirSync(tmpDir), [
++      "cursor-cursor@example.com.json",
++    ]);
+     const loaded = loadAllTokens(tmpDir, "cursor");
+     assert.equal(loaded.length, 1);
+     assert.equal(loaded[0].provider, "cursor");
+     assert.equal(loaded[0].cursorServiceMachineId, "machine-id");
+   } finally {
+     fs.rmSync(tmpDir, { recursive: true, force: true });
+   }
+ });
+ 
+ test("registry routes explicit cursor prefixes regardless of which providers are logged in", () => {
+@@ -209,21 +211,23 @@ test("registry routes explicit cursor prefixes regardless of which providers are
+     assert.equal(registry.forModel("cursor-premium").id, "cursor");
+     assert.equal(registry.forModel("cr/composer").id, "cursor");
+     // No accounts loaded yet → multi-provider fallback to anthropic.
+     assert.equal(registry.forModel("unknown-model").id, "anthropic");
+   } finally {
+     fs.rmSync(tmpDir, { recursive: true, force: true });
+   }
+ });
+ 
+ test("registry exclusive-cursor mode: bare model names route to cursor when only cursor has accounts", () => {
+-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-cursor-only-"));
++  const tmpDir = fs.mkdtempSync(
++    path.join(os.tmpdir(), "auth2api-cursor-only-"),
++  );
+   try {
+     saveToken(tmpDir, {
+       accessToken: "access",
+       refreshToken: "refresh",
+       email: "cursor-only@example.com",
+       expiresAt: "2030-01-01T00:00:00.000Z",
+       accountUuid: "machine-id",
+       provider: "cursor",
+       cursorServiceMachineId: "machine-id",
+       cursorClientVersion: "cli-test",
+@@ -348,21 +352,24 @@ test("cursor request helpers build headers, frame payloads, and decode text", ()
+   assert.equal(
+     decodeCursorText(connectProtoTextFrame("hello from cursor")),
+     "hello from cursor",
+   );
+   assert.equal(normalizeCursorResponsesBody({ input: "x" }).stream, true);
+ });
+ 
+ test("__resolveCursorModel maps public Anthropic/OpenAI names to Cursor SKUs", () => {
+   assert.equal(__resolveCursorModel("claude-sonnet-4-5"), "claude-4.5-sonnet");
+   assert.equal(__resolveCursorModel("claude-haiku-4-5"), "claude-4.5-haiku");
+-  assert.equal(__resolveCursorModel("claude-opus-4-7"), "claude-opus-4-7-medium");
++  assert.equal(
++    __resolveCursorModel("claude-opus-4-7"),
++    "claude-opus-4-7-medium",
++  );
+   assert.equal(__resolveCursorModel("opus"), "claude-opus-4-7-medium");
+   assert.equal(__resolveCursorModel("sonnet"), "claude-4.6-sonnet-medium");
+   assert.equal(__resolveCursorModel("haiku"), "claude-4.5-haiku");
+   assert.equal(__resolveCursorModel("gpt-5.5"), "gpt-5.5-medium");
+   assert.equal(__resolveCursorModel("o3"), "gpt-5.5-medium");
+ });
+ 
+ test("__resolveCursorModel strips routing prefix and passes Cursor SKUs through", () => {
+   assert.equal(
+     __resolveCursorModel("cursor-composer-2-fast"),
+@@ -461,23 +468,28 @@ test("extractCursorModelIds reads the structured models[] field", () => {
+   ]);
+   for (const id of ids) {
+     assert.ok(!/isRecommended|ModelConfig|backgroundComposer/i.test(id), id);
+   }
+ });
+ 
+ test("extractCursorModelIds rejects malformed payloads gracefully", () => {
+   assert.deepEqual(extractCursorModelIds(null), []);
+   assert.deepEqual(extractCursorModelIds("oops" as unknown), []);
+   assert.deepEqual(extractCursorModelIds({}), []);
+-  assert.deepEqual(extractCursorModelIds({ models: "not-array" } as unknown), []);
+   assert.deepEqual(
+-    extractCursorModelIds({ models: [{ name: "DEGRADATION_STATUS_UNSPECIFIED" }] }),
++    extractCursorModelIds({ models: "not-array" } as unknown),
++    [],
++  );
++  assert.deepEqual(
++    extractCursorModelIds({
++      models: [{ name: "DEGRADATION_STATUS_UNSPECIFIED" }],
++    }),
+     [],
+   );
+ });
+ 
+ test("extractCursorModelIds dedupes and prefers serverModelName over name", () => {
+   const sample = {
+     models: [
+       { name: "ui-name", serverModelName: "real-server-name" },
+       { name: "real-server-name" },
+       { serverModelName: "real-server-name" },
+diff --git a/tests/responses-translator.test.ts b/tests/responses-translator.test.ts
+index 67dfa54..6ddf2b4 100644
+--- a/tests/responses-translator.test.ts
++++ b/tests/responses-translator.test.ts
+@@ -74,21 +74,24 @@ test("chatToResponsesRequest: converts assistant tool_calls to function_call ite
+         ],
+       },
+       { role: "tool", tool_call_id: "call_1", content: "sunny" },
+     ],
+     tools: [
+       {
+         type: "function",
+         function: {
+           name: "get_weather",
+           description: "Get weather",
+-          parameters: { type: "object", properties: { city: { type: "string" } } },
++          parameters: {
++            type: "object",
++            properties: { city: { type: "string" } },
++          },
+         },
+       },
+     ],
+   });
+   // user message + function_call + function_call_output
+   assert.equal(out.input.length, 3);
+   assert.equal(out.input[1].type, "function_call");
+   assert.equal(out.input[1].name, "get_weather");
+   assert.equal(out.input[1].call_id, "call_1");
+   assert.equal(out.input[2].type, "function_call_output");
+@@ -370,25 +373,25 @@ test("responsesToChatCompletion: assembles text + reasoning + tool calls", () =>
+           arguments: '{"x":1}',
+         },
+       ],
+       usage: { input_tokens: 10, output_tokens: 5 },
+     },
+     "gpt-5.5-medium",
+   );
+   assert.equal(completion.object, "chat.completion");
+   assert.equal(completion.model, "gpt-5.5-medium");
+   assert.equal(completion.choices[0].message.content, "Hello, world!");
++  assert.equal(completion.choices[0].message.reasoning_content, "Thinking...");
+   assert.equal(
+-    completion.choices[0].message.reasoning_content,
+-    "Thinking...",
++    completion.choices[0].message.tool_calls[0].function.name,
++    "do_thing",
+   );
+-  assert.equal(completion.choices[0].message.tool_calls[0].function.name, "do_thing");
+   assert.equal(completion.choices[0].finish_reason, "tool_calls");
+   assert.equal(completion.usage.prompt_tokens, 10);
+   assert.equal(completion.usage.completion_tokens, 5);
+   assert.equal(completion.usage.total_tokens, 15);
+ });
+ 
+ test("responsesToChatCompletion: incomplete status maps to length finish_reason", () => {
+   const completion = responsesToChatCompletion(
+     {
+       status: "incomplete",
+@@ -431,21 +434,27 @@ test("responsesToAnthropicMessage: emits thinking + text + tool_use blocks in or
+   assert.equal(msg.stop_reason, "tool_use");
+   assert.equal(msg.usage.input_tokens, 3);
+   assert.equal(msg.usage.output_tokens, 2);
+ });
+ 
+ // ───────────────── responsesSSEToChat (streaming) ─────────────────
+ 
+ test("responsesSSEToChat: emits role primer, text deltas, finish + [DONE]", () => {
+   const state = makeResponsesToChatState("gpt-5.5-medium");
+   const chunks: string[] = [];
+-  chunks.push(...responsesSSEToChat("response.created", { type: "response.created" }, state));
++  chunks.push(
++    ...responsesSSEToChat(
++      "response.created",
++      { type: "response.created" },
++      state,
++    ),
++  );
+   chunks.push(
+     ...responsesSSEToChat("response.output_text.delta", { delta: "Hi" }, state),
+   );
+   chunks.push(
+     ...responsesSSEToChat("response.output_text.delta", { delta: "!" }, state),
+   );
+   chunks.push(
+     ...responsesSSEToChat(
+       "response.completed",
+       { response: { status: "completed" } },
+@@ -456,21 +465,23 @@ test("responsesSSEToChat: emits role primer, text deltas, finish + [DONE]", () =
+   const all = chunks.join("");
+   // role primer
+   assert.match(all, /"role":"assistant"/);
+   // content deltas
+   assert.match(all, /"content":"Hi"/);
+   assert.match(all, /"content":"!"/);
+   // finish_reason + DONE sentinel
+   assert.match(all, /"finish_reason":"stop"/);
+   assert.match(all, /data: \[DONE\]/);
+   // every line should reference the same chatcmpl id
+-  const ids = [...all.matchAll(/"id":"(chatcmpl-[a-f0-9]+)"/g)].map((m) => m[1]);
++  const ids = [...all.matchAll(/"id":"(chatcmpl-[a-f0-9]+)"/g)].map(
++    (m) => m[1],
++  );
+   assert.ok(ids.length >= 3);
+   assert.equal(new Set(ids).size, 1);
+ });
+ 
+ test("responsesSSEToChat: routes reasoning deltas to reasoning_content", () => {
+   const state = makeResponsesToChatState("gpt-5.5-medium-thinking");
+   const chunks = [
+     ...responsesSSEToChat(
+       "response.reasoning_summary_text.delta",
+       { delta: "Considering options..." },
+@@ -590,22 +601,28 @@ test("responsesSSEToAnthropic: tool_use input_json_delta resolves when item_id d
+       { item_id: "fc_abc", delta: '{"city":"Tokyo"}' },
+       state,
+     ),
+     ...responsesSSEToAnthropic(
+       "response.completed",
+       { response: { status: "completed" } },
+       state,
+     ),
+   ];
+   const all = out.join("");
+-  assert.match(all, /"content_block":\{"type":"tool_use","id":"call_xyz","name":"get_weather"/);
+-  assert.match(all, /"type":"input_json_delta","partial_json":"\{\\"city\\":\\"Tokyo\\"\}"/);
++  assert.match(
++    all,
++    /"content_block":\{"type":"tool_use","id":"call_xyz","name":"get_weather"/,
++  );
++  assert.match(
++    all,
++    /"type":"input_json_delta","partial_json":"\{\\"city\\":\\"Tokyo\\"\}"/,
++  );
+   assert.match(all, /"stop_reason":"tool_use"/);
+ });
+ 
+ // ───────────────── responsesSSEToAnthropic (streaming) ─────────────────
+ 
+ test("responsesSSEToAnthropic: emits message_start → text block → message_stop", () => {
+   const state = makeResponsesToAnthropicState("claude-sonnet-4-5");
+   const out = [
+     ...responsesSSEToAnthropic("response.created", {}, state),
+     ...responsesSSEToAnthropic(
+@@ -689,98 +706,101 @@ test("responsesSSEToAnthropic: tool calls become tool_use blocks with input_json
+       { item_id: "call_1", delta: '{"x":1}' },
+       state,
+     ),
+     ...responsesSSEToAnthropic(
+       "response.completed",
+       { response: { status: "completed" } },
+       state,
+     ),
+   ];
+   const all = out.join("");
+-  assert.match(all, /"content_block":\{"type":"tool_use","id":"call_1","name":"f"/);
++  assert.match(
++    all,
++    /"content_block":\{"type":"tool_use","id":"call_1","name":"f"/,
++  );
+   assert.match(all, /"type":"input_json_delta","partial_json":"\{\\"x\\":1\}"/);
+   // tool_use must set stop_reason=tool_use in the final message_delta
+   assert.match(all, /"stop_reason":"tool_use"/);
+ });
+ 
+ // ───────────────── readSseEvents (shared drain helper) ─────────────────
+ 
+ test("readSseEvents: emits each event/data pair in order", async () => {
+   const resp = makeStreamingResponse([
+-    "event: a\ndata: {\"x\":1}\n\n",
+-    "event: b\ndata: {\"y\":2}\n\n",
++    'event: a\ndata: {"x":1}\n\n',
++    'event: b\ndata: {"y":2}\n\n',
+   ]);
+   const events: Array<{ event: string; data: any }> = [];
+   for await (const ev of readSseEvents(resp)) events.push(ev);
+   assert.deepEqual(events, [
+     { event: "a", data: { x: 1 } },
+     { event: "b", data: { y: 2 } },
+   ]);
+ });
+ 
+ test("readSseEvents: stitches lines split across chunk boundaries", async () => {
+   const resp = makeStreamingResponse([
+     "event: a\nda",
+-    "ta: {\"x\":1}\n\nevent: b\n",
+-    "data: {\"y\":2}\n\n",
++    'ta: {"x":1}\n\nevent: b\n',
++    'data: {"y":2}\n\n',
+   ]);
+   const events: Array<{ event: string; data: any }> = [];
+   for await (const ev of readSseEvents(resp)) events.push(ev);
+   assert.deepEqual(events, [
+     { event: "a", data: { x: 1 } },
+     { event: "b", data: { y: 2 } },
+   ]);
+ });
+ 
+ test("readSseEvents: flushes the final un-terminated line on stream close", async () => {
+   // Crucially: no trailing \n on the last data: line. Previous hand-rolled
+   // drains in handlers would silently drop this final event.
+   const resp = makeStreamingResponse([
+-    "event: response.completed\ndata: {\"response\":{\"status\":\"completed\"}}",
++    'event: response.completed\ndata: {"response":{"status":"completed"}}',
+   ]);
+   const events: Array<{ event: string; data: any }> = [];
+   for await (const ev of readSseEvents(resp)) events.push(ev);
+   assert.equal(events.length, 1);
+   assert.equal(events[0].event, "response.completed");
+   assert.deepEqual(events[0].data, { response: { status: "completed" } });
+ });
+ 
+ test("readSseEvents: handles \\r\\n line endings transparently", async () => {
+-  const resp = makeStreamingResponse([
+-    "event: a\r\ndata: {\"x\":1}\r\n\r\n",
+-  ]);
++  const resp = makeStreamingResponse(['event: a\r\ndata: {"x":1}\r\n\r\n']);
+   const events: Array<{ event: string; data: any }> = [];
+   for await (const ev of readSseEvents(resp)) events.push(ev);
+   assert.deepEqual(events, [{ event: "a", data: { x: 1 } }]);
+ });
+ 
+ test("readSseEvents: tolerates unparseable JSON by yielding data:null", async () => {
+   const resp = makeStreamingResponse([
+     "event: a\ndata: not-json\n\n",
+-    "event: b\ndata: {\"y\":2}\n\n",
++    'event: b\ndata: {"y":2}\n\n',
+   ]);
+   const events: Array<{ event: string; data: any }> = [];
+   for await (const ev of readSseEvents(resp)) events.push(ev);
+   assert.equal(events.length, 2);
+   assert.equal(events[0].event, "a");
+   assert.equal(events[0].data, null);
+   assert.deepEqual(events[1], { event: "b", data: { y: 2 } });
+ });
+ 
+ // ───────────────── drainCodexResponsesSse ─────────────────
+ 
+ test("drainCodexResponsesSse: captures completed response verbatim", async () => {
+   const completed = {
+     id: "resp_x",
+     object: "response",
+     status: "completed",
+-    output: [{ type: "message", content: [{ type: "output_text", text: "hi" }] }],
++    output: [
++      { type: "message", content: [{ type: "output_text", text: "hi" }] },
++    ],
+     usage: { input_tokens: 3, output_tokens: 1 },
+   };
+   const resp = makeStreamingResponse([
+     'event: response.created\ndata: {"response":{"id":"resp_x"}}\n\n',
+     'event: response.output_text.delta\ndata: {"delta":"h"}\n\n',
+     'event: response.output_text.delta\ndata: {"delta":"i"}\n\n',
+     `event: response.completed\ndata: ${JSON.stringify({ response: completed })}\n\n`,
+   ]);
+   const drained = await drainCodexResponsesSse(resp);
+   assert.equal(drained.textOut, "hi");
+@@ -792,21 +812,23 @@ test("drainCodexResponsesSse: captures completed response verbatim", async () =>
+ 
+ test("drainCodexResponsesSse: captures the final response.completed even without trailing newline", async () => {
+   // This is the exact regression the shared drain helper was added to
+   // prevent: a small upstream where the very last `data:` line has no
+   // terminator before connection close. The previous loops would drop
+   // the completed event, leaving the chat/messages aggregators with
+   // textOut/usage but no completedResponse.
+   const completed = {
+     id: "resp_short",
+     status: "completed",
+-    output: [{ type: "message", content: [{ type: "output_text", text: "ok" }] }],
++    output: [
++      { type: "message", content: [{ type: "output_text", text: "ok" }] },
++    ],
+     usage: { input_tokens: 1, output_tokens: 1 },
+   };
+   const resp = makeStreamingResponse([
+     'event: response.output_text.delta\ndata: {"delta":"ok"}\n\n',
+     `event: response.completed\ndata: ${JSON.stringify({ response: completed })}`,
+   ]);
+   const drained = await drainCodexResponsesSse(resp);
+   assert.equal(drained.textOut, "ok");
+   assert.equal(drained.completedResponse?.id, "resp_short");
+   assert.equal(drained.completedResponse?.status, "completed");
+@@ -884,24 +906,26 @@ test("responsesSSEToAnthropic: a single tool block emits exactly one content_blo
+     ),
+     ...responsesSSEToAnthropic(
+       "response.completed",
+       { response: { status: "completed" } },
+       state,
+     ),
+   ];
+   const all = out.join("");
+   // Count content_block_stop events for the tool block (index 0
+   // since it's the first block opened in this stream).
+-  const stops = all.match(
+-    /"type":"content_block_stop","index":0/g,
++  const stops = all.match(/"type":"content_block_stop","index":0/g);
++  assert.equal(
++    stops?.length,
++    1,
++    `expected exactly one content_block_stop for the tool block, saw ${stops?.length}`,
+   );
+-  assert.equal(stops?.length, 1, `expected exactly one content_block_stop for the tool block, saw ${stops?.length}`);
+ });
+ 
+ test("drainCodexResponsesSse: surfaces response.failed errors", async () => {
+   const resp = makeStreamingResponse([
+     'event: response.failed\ndata: {"response":{"error":{"message":"boom"}}}\n\n',
+   ]);
+   const drained = await drainCodexResponsesSse(resp);
+   assert.equal(drained.upstreamError, "boom");
+   assert.equal(drained.completedResponse, null);
+ });
+diff --git a/tests/smoke.test.ts b/tests/smoke.test.ts
+index 982632d..11500db 100644
+--- a/tests/smoke.test.ts
++++ b/tests/smoke.test.ts
+@@ -153,21 +153,25 @@ async function requestJson(options: {
+     req.end();
+   });
+ }
+ 
+ async function requestText(options: {
+   server: http.Server;
+   method: string;
+   path: string;
+   headers?: Record<string, string>;
+   body?: unknown;
+-}): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
++}): Promise<{
++  status: number;
++  body: string;
++  headers: http.IncomingHttpHeaders;
++}> {
+   const address = serverAddress(options.server);
+   const payload = options.body ? JSON.stringify(options.body) : undefined;
+ 
+   return new Promise((resolve, reject) => {
+     const req = http.request(
+       {
+         host: "127.0.0.1",
+         port: address.port,
+         method: options.method,
+         path: options.path,
+@@ -1425,21 +1429,20 @@ test("cursor SSE forwards deltas as soon as upstream HTTP/2 chunks arrive (no wh
+   // half the upstream gap × 2 (= one full gap).
+   const spread = arrivals[arrivals.length - 1] - arrivals[0];
+   assert.ok(
+     spread >= chunkGapMs,
+     `output_text.delta events arrived in ${spread}ms across ${arrivals.length} frames ` +
+       `(expected at least ${chunkGapMs}ms spread). The HTTP/2 transport ` +
+       `may have buffered the entire upstream response.`,
+   );
+ });
+ 
+-
+ test("cursor /v1/messages emits Anthropic Messages SSE for bare model names in cursor-only mode", async (t) => {
+   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+   saveToken(
+     authDir,
+     makeToken({
+       accessToken: "cursor-access",
+       refreshToken: "cursor-refresh",
+       email: "cursor-only@example.com",
+       accountUuid: "cursor-machine",
+       provider: "cursor",
+@@ -2039,21 +2042,23 @@ test("codex /v1/chat/completions non-stream still captures final SSE event when
+       email: "codex-drain@example.com",
+       accountUuid: "chatgpt-account-id",
+       provider: "codex",
+     }),
+   );
+ 
+   // Build an SSE body whose final event has NO trailing \n\n.
+   const ev = (event: string, data: unknown) =>
+     `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
+   const sseNoTrailingNewline =
+-    ev("response.created", { response: { id: "resp_x", status: "in_progress" } }) +
++    ev("response.created", {
++      response: { id: "resp_x", status: "in_progress" },
++    }) +
+     ev("response.output_text.delta", { delta: "answer" }) +
+     `event: response.completed\ndata: ${JSON.stringify({
+       response: {
+         id: "resp_x",
+         status: "completed",
+         usage: { input_tokens: 1, output_tokens: 2 },
+       },
+     })}`; // ← deliberately no trailing newline
+ 
+   const restoreFetch = withMockedFetch(async () => {
+@@ -2131,21 +2136,21 @@ test("codex /v1/responses non-stream splices streamed output_item.done into comp
+     status: "completed",
+     role: "assistant",
+     content: [{ type: "output_text", text: "PONG", annotations: [] }],
+   };
+   const functionCallItem = {
+     id: "fc_1",
+     type: "function_call",
+     status: "completed",
+     call_id: "call_xyz",
+     name: "get_weather",
+-    arguments: "{\"city\":\"Tokyo\"}",
++    arguments: '{"city":"Tokyo"}',
+   };
+ 
+   const sseBody =
+     ev("response.created", {
+       response: { id: "resp_splice", status: "in_progress" },
+     }) +
+     ev("response.output_item.done", { item: reasoningItem }) +
+     ev("response.output_item.done", { item: messageItem }) +
+     ev("response.output_item.done", { item: functionCallItem }) +
+     ev("response.completed", {
+@@ -2184,36 +2189,33 @@ test("codex /v1/responses non-stream splices streamed output_item.done into comp
+       ],
+       stream: false,
+     },
+   });
+ 
+   assert.equal(jsonResp.status, 200);
+   assert.equal(jsonResp.body.id, "resp_splice");
+   assert.equal(jsonResp.body.status, "completed");
+   // The handler-level splice: completed.response.output was [] but
+   // we should have stitched the three streamed items in order.
+-  assert.ok(
+-    Array.isArray(jsonResp.body.output),
+-    "output must be an array",
+-  );
++  assert.ok(Array.isArray(jsonResp.body.output), "output must be an array");
+   assert.equal(
+     jsonResp.body.output.length,
+     3,
+     `expected 3 output items spliced from output_item.done events, got ${jsonResp.body.output.length}`,
+   );
+   assert.equal(jsonResp.body.output[0].type, "reasoning");
+   assert.equal(jsonResp.body.output[0].summary[0].text, "thinking briefly");
+   assert.equal(jsonResp.body.output[1].type, "message");
+   assert.equal(jsonResp.body.output[1].content[0].text, "PONG");
+   assert.equal(jsonResp.body.output[2].type, "function_call");
+   assert.equal(jsonResp.body.output[2].call_id, "call_xyz");
+-  assert.equal(jsonResp.body.output[2].arguments, "{\"city\":\"Tokyo\"}");
++  assert.equal(jsonResp.body.output[2].arguments, '{"city":"Tokyo"}');
+   // Usage from completed.response is preserved.
+   assert.deepEqual(jsonResp.body.usage, {
+     input_tokens: 17,
+     output_tokens: 9,
+   });
+ });
+ 
+ test("codex /v1/responses non-stream prefers upstream-populated output over streamed items (defensive)", async (t) => {
+   // The handler's splice is conditional: if a future codex backend
+   // ever starts populating `response.completed.response.output`
+@@ -2282,15 +2284,12 @@ test("codex /v1/responses non-stream prefers upstream-populated output over stre
+         { role: "user", content: [{ type: "input_text", text: "ping" }] },
+       ],
+       stream: false,
+     },
+   });
+ 
+   assert.equal(jsonResp.status, 200);
+   // When upstream supplies output already, it wins.
+   assert.equal(jsonResp.body.output.length, 1);
+   assert.equal(jsonResp.body.output[0].id, "msg_completed");
+-  assert.equal(
+-    jsonResp.body.output[0].content[0].text,
+-    "FROM_COMPLETED",
+-  );
++  assert.equal(jsonResp.body.output[0].content[0].text, "FROM_COMPLETED");
+ });
+diff --git a/tests/unit.test.ts b/tests/unit.test.ts
+index 0d81206..cb20c84 100644
+--- a/tests/unit.test.ts
++++ b/tests/unit.test.ts
+@@ -16,20 +16,21 @@ import {
+   anthropicToOpenai,
+   createStreamState,
+   anthropicSSEToChat,
+   responsesToAnthropic,
+   anthropicToResponses,
+   makeResponsesState,
+   anthropicSSEToResponses,
+ } from "../src/upstream/translator";
+ import { loadConfig, isDebugLevel, resolveAuthDir } from "../src/config";
+ import { UsageData } from "../src/accounts/manager";
++import { buildRegistry } from "../src/providers/registry";
+ 
+ // ══════════════════════════════════════════════════
+ // utils/common.ts
+ // ══════════════════════════════════════════════════
+ 
+ test("extractApiKey extracts Bearer token", () => {
+   assert.equal(
+     extractApiKey({ authorization: "Bearer sk-test-123" }),
+     "sk-test-123",
+   );
+@@ -1212,37 +1213,39 @@ test("StatsRecorder skips byAccount when provider/email missing", () => {
+       .requests,
+     1,
+   );
+   assert.equal(snapshot.totals.requests, 1);
+ });
+ 
+ test("createServer stats endpoint records mounted route prefix", async () => {
+   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+   const recorder = new StatsRecorder();
+   recorder.start(tmp);
++  const registry = buildRegistry(tmp);
++  for (const provider of registry.all()) provider.manager.load();
+   const app = createServer(
+     {
+       host: "",
+       port: 0,
+       "auth-dir": tmp,
+       "api-keys": new Set(["sk-test"]),
+       "body-limit": "1mb",
+       cloaking: {},
+       timeouts: {
+         "messages-ms": 1000,
+         "stream-messages-ms": 1000,
+         "count-tokens-ms": 1000,
+       },
+       stats: { enabled: true },
+       debug: "off",
+     } as any,
+-    {} as any,
++    registry,
+     recorder,
+   );
+   const server = app.listen(0);
+   try {
+     const port = (server.address() as any).port;
+     const headers = { Authorization: "Bearer sk-test" };
+     await fetch(`http://127.0.0.1:${port}/admin/stats`, { headers });
+     const second = await fetch(`http://127.0.0.1:${port}/admin/stats`, {
+       headers,
+     });
+@@ -1252,37 +1255,39 @@ test("createServer stats endpoint records mounted route prefix", async () => {
+     await new Promise<void>((resolve) => server.close(() => resolve()));
+     await recorder.stop();
+     fs.rmSync(tmp, { recursive: true, force: true });
+   }
+ });
+ 
+ test("createServer stats records client disconnects on close", async () => {
+   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-stats-"));
+   const recorder = new StatsRecorder();
+   recorder.start(tmp);
++  const registry = buildRegistry(tmp);
++  for (const provider of registry.all()) provider.manager.load();
+   const app = createServer(
+     {
+       host: "",
+       port: 0,
+       "auth-dir": tmp,
+       "api-keys": new Set(["sk-test"]),
+       "body-limit": "1mb",
+       cloaking: {},
+       timeouts: {
+         "messages-ms": 1000,
+         "stream-messages-ms": 1000,
+         "count-tokens-ms": 1000,
+       },
+       stats: { enabled: true },
+       debug: "off",
+     } as any,
+-    {} as any,
++    registry,
+     recorder,
+   );
+   let resolveReached!: () => void;
+   const reached = new Promise<void>((resolve) => {
+     resolveReached = resolve;
+   });
+   app.get("/v1/hang", (_req, res) => {
+     if (res.locals.stats) res.locals.stats.model = "hang";
+     resolveReached();
+     // Intentionally never write a response; the client abort below should
