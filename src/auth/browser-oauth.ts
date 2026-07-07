@@ -209,8 +209,7 @@ function startBrowserCallback(options: {
       const server = http.createServer(requestHandler);
 
       server.once("error", (err) => {
-        const serverError =
-          err instanceof Error ? err : new Error(String(err));
+        const serverError = err instanceof Error ? err : new Error(String(err));
 
         if (startupResolved) {
           void finish(serverError);
@@ -227,9 +226,7 @@ function startBrowserCallback(options: {
 
     for (const { host, server } of servers) {
       server.listen(
-        host === "::1"
-          ? { port, host, ipv6Only: true }
-          : { port, host },
+        host === "::1" ? { port, host, ipv6Only: true } : { port, host },
         () => {
           listeningServers.add(server);
           pendingStarts -= 1;

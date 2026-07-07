@@ -155,7 +155,9 @@ function normalizeReasoningConfig(value: unknown): ReasoningConfig {
     ) {
       reasoning.codex = raw.codex as CodexReasoningLevel;
     } else {
-      console.warn(`Ignoring invalid reasoning.codex value: ${String(raw.codex)}`);
+      console.warn(
+        `Ignoring invalid reasoning.codex value: ${String(raw.codex)}`,
+      );
     }
   }
 

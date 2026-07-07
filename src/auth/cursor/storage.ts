@@ -69,9 +69,9 @@ function readJsonStorage(storagePath: string): CursorStorageMap {
 function readSqliteStorage(storagePath: string): CursorStorageMap {
   const out: CursorStorageMap = {};
   let lastError: any = null;
-  const quotedKeys = CURSOR_KEYS.map((key) => `'${key.replace(/'/g, "''")}'`).join(
-    ",",
-  );
+  const quotedKeys = CURSOR_KEYS.map(
+    (key) => `'${key.replace(/'/g, "''")}'`,
+  ).join(",");
   for (const table of ["ItemTable", "cursorDiskKV"]) {
     const select = `SELECT key, value FROM ${table} WHERE key IN (${quotedKeys});`;
     try {
@@ -131,7 +131,8 @@ export function cursorTokenFromStorage(
     );
   }
 
-  const email = storage["cursorAuth/cachedEmail"] || overrides.email || "unknown";
+  const email =
+    storage["cursorAuth/cachedEmail"] || overrides.email || "unknown";
   const serviceMachineId =
     storage["storage.serviceMachineId"] ||
     overrides.cursorServiceMachineId ||

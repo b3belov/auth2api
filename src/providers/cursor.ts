@@ -2,10 +2,7 @@ import { PKCECodes, TokenData } from "../auth/types";
 import { loadAllTokens } from "../auth/token-storage";
 import { refreshCursorTokensWithRetry } from "../auth/cursor/oauth";
 import { AccountManager } from "../accounts/manager";
-import {
-  callCursorResponses,
-  listCursorModels,
-} from "../upstream/cursor-api";
+import { callCursorResponses, listCursorModels } from "../upstream/cursor-api";
 import { Provider, UpstreamCallContext, ProviderOAuthInfo } from "./types";
 
 const CURSOR_OAUTH: ProviderOAuthInfo = {
@@ -39,7 +36,9 @@ export function buildCursorProvider(authDir: string): Provider {
       );
     },
     exchangeCode: async () => {
-      throw new Error("Cursor provider does not implement browser OAuth exchange");
+      throw new Error(
+        "Cursor provider does not implement browser OAuth exchange",
+      );
     },
     listModels: () => listCursorModels(manager),
     callMessages: (opts: UpstreamCallContext) => {

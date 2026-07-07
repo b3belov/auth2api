@@ -75,7 +75,10 @@ export function __setCursorTransport(transport: CursorTransport | null): void {
 function bodyToReadableStream(
   body: ReadableStream<Uint8Array> | Uint8Array | Buffer,
 ): ReadableStream<Uint8Array> {
-  if (body && typeof (body as ReadableStream<Uint8Array>).getReader === "function") {
+  if (
+    body &&
+    typeof (body as ReadableStream<Uint8Array>).getReader === "function"
+  ) {
     return body as ReadableStream<Uint8Array>;
   }
   const bytes =
@@ -111,7 +114,8 @@ function http2Post(
     let headersResolved = false;
     let status = 0;
     const responseHeaders: Record<string, string> = {};
-    let bodyController: ReadableStreamDefaultController<Uint8Array> | null = null;
+    let bodyController: ReadableStreamDefaultController<Uint8Array> | null =
+      null;
     let bodyClosed = false;
 
     const closeBody = (err?: Error) => {
@@ -260,7 +264,10 @@ function encodeVarintField(field: number, value: number): Uint8Array {
   return concatBytes([encodeVarint((field << 3) | 0), encodeVarint(value)]);
 }
 
-function encodeBytesField(field: number, value: Uint8Array | string): Uint8Array {
+function encodeBytesField(
+  field: number,
+  value: Uint8Array | string,
+): Uint8Array {
   const payload =
     typeof value === "string" ? new TextEncoder().encode(value) : value;
   return concatBytes([
@@ -270,7 +277,10 @@ function encodeBytesField(field: number, value: Uint8Array | string): Uint8Array
   ]);
 }
 
-function encodeField(field: number, value: string | number | Uint8Array): Uint8Array {
+function encodeField(
+  field: number,
+  value: string | number | Uint8Array,
+): Uint8Array {
   if (typeof value === "number") return encodeVarintField(field, value);
   return encodeBytesField(field, value);
 }
@@ -376,10 +386,7 @@ interface ChatMessageInput {
 
 function messagesFromBody(body: any): ChatMessageInput[] {
   const collected: ChatMessageInput[] = [];
-  const pushText = (
-    role: ChatMessageInput["role"],
-    raw: unknown,
-  ): void => {
+  const pushText = (role: ChatMessageInput["role"], raw: unknown): void => {
     if (typeof raw === "string") {
       const trimmed = raw.trim();
       if (trimmed) collected.push({ role, content: raw });
@@ -475,7 +482,10 @@ function encodeMetadata(): Uint8Array {
   // Reverse-engineered Metadata fields. Keep static so cloaking decisions stay
   // visible at a single configuration point and not rotated per request.
   return concatBytes([
-    encodeBytesField(1, process.platform === "win32" ? "windows" : process.platform),
+    encodeBytesField(
+      1,
+      process.platform === "win32" ? "windows" : process.platform,
+    ),
     encodeBytesField(2, process.arch),
     encodeBytesField(3, process.version.replace(/^v/, "")),
     encodeBytesField(4, process.execPath),
@@ -545,7 +555,10 @@ export function encodeCursorChatRequest(body: any): CursorRequestEncoding {
   const wrapped = encodeBytesField(1, request);
   return {
     bytes: connectFrame(wrapped),
-    prompt: messages.map((m) => m.content).join("\n").trim(),
+    prompt: messages
+      .map((m) => m.content)
+      .join("\n")
+      .trim(),
     conversationId,
   };
 }
@@ -567,7 +580,8 @@ function jyhEncode(bytes: Uint8Array): string {
     const c = i + 2 < bytes.length ? bytes[i + 2] : 0;
     out += URL_SAFE_BASE64[a >> 2];
     out += URL_SAFE_BASE64[((a & 3) << 4) | (b >> 4)];
-    if (i + 1 < bytes.length) out += URL_SAFE_BASE64[((b & 15) << 2) | (c >> 6)];
+    if (i + 1 < bytes.length)
+      out += URL_SAFE_BASE64[((b & 15) << 2) | (c >> 6)];
     if (i + 2 < bytes.length) out += URL_SAFE_BASE64[c & 63];
   }
   return out;
@@ -599,7 +613,9 @@ export function __buildCursorHeaders(
   const cursor = config.cloaking.cursor || {};
   const token = account.token.accessToken;
   const machineId =
-    account.token.cursorServiceMachineId || account.accountUuid || account.deviceId;
+    account.token.cursorServiceMachineId ||
+    account.accountUuid ||
+    account.deviceId;
   const clientVersion =
     cursor["client-version"] ||
     account.token.cursorClientVersion ||
@@ -631,7 +647,9 @@ export function __buildCursorHeaders(
     "x-cursor-client-device-type": "desktop",
     "x-cursor-config-version": configVersion,
     "x-cursor-timezone":
-      cursor.timezone || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC",
+      cursor.timezone ||
+      Intl.DateTimeFormat().resolvedOptions().timeZone ||
+      "UTC",
     "x-ghost-mode": cursor["ghost-mode"] || "true",
     "x-session-id": sessionId,
     "x-request-id": uuidv4(),
@@ -687,7 +705,10 @@ function parseFields(data: Uint8Array): ProtoFieldRaw[] {
   return out;
 }
 
-function getFieldBytes(fields: ProtoFieldRaw[], field: number): Uint8Array | undefined {
+function getFieldBytes(
+  fields: ProtoFieldRaw[],
+  field: number,
+): Uint8Array | undefined {
   return fields.find((f) => f.field === field && f.wireType === 2)?.bytes;
 }
 
@@ -762,7 +783,9 @@ function extractInnerText(payload: Uint8Array, depth = 0): string {
     (f) => f.field === 1 && f.wireType === 2 && f.bytes !== undefined,
   );
   if (candidate?.bytes) {
-    const text = new TextDecoder("utf-8", { fatal: false }).decode(candidate.bytes);
+    const text = new TextDecoder("utf-8", { fatal: false }).decode(
+      candidate.bytes,
+    );
     if (isUtfPrintable(text) && !isUuidLike(text.trim())) return text;
   }
   let acc = "";
@@ -913,7 +936,10 @@ export function createCursorStreamingDecoder(): CursorStreamingDecoder {
     return { reasoningDelta: reasoningPart, textDelta: textPart };
   }
 
-  function flushReasoning(): { reasoningDelta: string; textDelta: string } | null {
+  function flushReasoning(): {
+    reasoningDelta: string;
+    textDelta: string;
+  } | null {
     if (!pendingReasoning) return null;
     const out = { reasoningDelta: pendingReasoning, textDelta: "" };
     pendingReasoning = "";
@@ -968,9 +994,11 @@ export function createCursorStreamingDecoder(): CursorStreamingDecoder {
           if (textDelta && resolved === "none") {
             // First real text delta — commit any pending reasoning as-is.
             const flushed = flushReasoning();
-            if (flushed) reasoningDelta = flushed.reasoningDelta + reasoningDelta;
+            if (flushed)
+              reasoningDelta = flushed.reasoningDelta + reasoningDelta;
           }
-          if (textDelta || reasoningDelta) out.push({ textDelta, reasoningDelta });
+          if (textDelta || reasoningDelta)
+            out.push({ textDelta, reasoningDelta });
         } else if (type === 2 || type === 3) {
           const err = extractJsonError(payload);
           if (err) error = err;
@@ -995,7 +1023,10 @@ interface ResponsesSseOptions {
   reasoning?: string;
 }
 
-function buildResponsesCompletedSse(model: string, opts: ResponsesSseOptions): string {
+function buildResponsesCompletedSse(
+  model: string,
+  opts: ResponsesSseOptions,
+): string {
   const id = `resp_${uuidv4().replace(/-/g, "")}`;
   const created = Math.floor(Date.now() / 1000);
   const reasoningContent =
@@ -1108,9 +1139,11 @@ async function cursorUpstreamToSse(
         yield d;
       }
     }
-    const drained = (decoder as CursorStreamingDecoder & {
-      drain(): { reasoningDelta: string };
-    }).drain();
+    const drained = (
+      decoder as CursorStreamingDecoder & {
+        drain(): { reasoningDelta: string };
+      }
+    ).drain();
     if (drained.reasoningDelta) {
       aggregatedReasoning += drained.reasoningDelta;
       yield { reasoningDelta: drained.reasoningDelta, textDelta: "" };
@@ -1235,10 +1268,12 @@ async function* openaiResponsesGenerator(
       return;
     }
     if (item.reasoningDelta) {
-      yield `event: response.reasoning_summary_text.delta\ndata: ${JSON.stringify({
-        type: "response.reasoning_summary_text.delta",
-        delta: item.reasoningDelta,
-      })}\n\n`;
+      yield `event: response.reasoning_summary_text.delta\ndata: ${JSON.stringify(
+        {
+          type: "response.reasoning_summary_text.delta",
+          delta: item.reasoningDelta,
+        },
+      )}\n\n`;
     }
     if (item.textDelta) {
       yield `event: response.output_text.delta\ndata: ${JSON.stringify({
@@ -1383,7 +1418,10 @@ async function* openaiChatCompletionsGenerator(
   const created = Math.floor(Date.now() / 1000);
   const fingerprint = `fp_${uuidv4().replace(/-/g, "").slice(0, 12)}`;
 
-  const chunk = (delta: Record<string, unknown>, finishReason: string | null = null) => {
+  const chunk = (
+    delta: Record<string, unknown>,
+    finishReason: string | null = null,
+  ) => {
     const payload = {
       id,
       object: "chat.completion.chunk",
@@ -1559,7 +1597,9 @@ export async function callCursorResponses(
   options: CallCursorResponsesOptions,
 ): Promise<Response> {
   const { account, config } = options;
-  const body = normalizeCursorResponsesBody(options.body ?? options.request.body);
+  const body = normalizeCursorResponsesBody(
+    options.body ?? options.request.body,
+  );
   // Cursor's chat is reverse-engineered to live at api2.cursor.sh. We expose
   // both legacy "agent-base-url" and "api-base-url" config keys so users can
   // override the host without forcing a code change.
@@ -1644,11 +1684,15 @@ export async function listCursorModels(
       signal: AbortSignal.timeout(10_000),
     });
     if (!resp.ok) throw new Error(`status ${resp.status}`);
-    const parsed = (await resp.json()) as { models?: Array<Record<string, unknown>> };
+    const parsed = (await resp.json()) as {
+      models?: Array<Record<string, unknown>>;
+    };
     const ids = extractCursorModelIds(parsed);
     if (ids.length) return ids.map((id) => ({ id, owned_by: "cursor" }));
   } catch (err: any) {
-    console.error(`[cursor] AvailableModels failed: ${err?.message || String(err)}`);
+    console.error(
+      `[cursor] AvailableModels failed: ${err?.message || String(err)}`,
+    );
   }
   return FALLBACK_MODELS.map((id) => ({ id, owned_by: "cursor" }));
 }
@@ -1678,8 +1722,8 @@ export function extractCursorModelIds(parsed: unknown): string[] {
       typeof e.serverModelName === "string"
         ? e.serverModelName
         : typeof e.name === "string"
-        ? e.name
-        : "";
+          ? e.name
+          : "";
     const trimmed = candidate.trim();
     if (!trimmed) continue;
     // Drop placeholder enum values and obviously invalid identifiers.

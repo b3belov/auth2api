@@ -707,10 +707,7 @@ test("normalizeCodexResponsesBody rejects function_call input items with empty n
       assert.equal(err.name, "ResponsesTranslationError");
       assert.equal(err.status, 400);
       assert.equal(err.code, "invalid_tool_call_name");
-      assert.match(
-        err.message,
-        /input\[0\]\.name must be a non-empty string/,
-      );
+      assert.match(err.message, /input\[0\]\.name must be a non-empty string/);
       return true;
     },
   );
@@ -1095,7 +1092,10 @@ function makeNotifyConfig(): Config2 {
 }
 
 function withFetchStub(
-  stub: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+  stub: (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => Promise<Response>,
 ): () => void {
   const orig = globalThis.fetch;
   globalThis.fetch = stub as typeof fetch;
@@ -1129,10 +1129,10 @@ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer
   let seen: { url: string; init?: RequestInit } | null = null;
   const restoreFetch = withFetchStub(async (input, init) => {
     seen = { url: String(input), init };
-    return new Response(
-      JSON.stringify({ reloaded: {}, generated_at: "now" }),
-      { status: 200, headers: { "Content-Type": "application/json" } },
-    );
+    return new Response(JSON.stringify({ reloaded: {}, generated_at: "now" }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    });
   });
   const cap = captureLogs();
   try {
@@ -1148,7 +1148,9 @@ test("notifyServerReload posts to /admin/reload with the first api-key as Bearer
     (seen!.init?.headers as Record<string, string>)?.Authorization,
     "Bearer sk-test",
   );
-  assert.ok(cap.logs.some((l) => l.includes("Notified running auth2api server")));
+  assert.ok(
+    cap.logs.some((l) => l.includes("Notified running auth2api server")),
+  );
   assert.equal(cap.warns.length, 0);
 });
 

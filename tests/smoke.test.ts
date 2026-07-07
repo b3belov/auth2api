@@ -160,7 +160,11 @@ async function requestText(options: {
   path: string;
   headers?: Record<string, string>;
   body?: unknown;
-}): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+}): Promise<{
+  status: number;
+  body: string;
+  headers: http.IncomingHttpHeaders;
+}> {
   const address = serverAddress(options.server);
   const payload = options.body ? JSON.stringify(options.body) : undefined;
 
@@ -1432,7 +1436,6 @@ test("cursor SSE forwards deltas as soon as upstream HTTP/2 chunks arrive (no wh
   );
 });
 
-
 test("cursor /v1/messages emits Anthropic Messages SSE for bare model names in cursor-only mode", async (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
   saveToken(
@@ -2046,7 +2049,9 @@ test("codex /v1/chat/completions non-stream still captures final SSE event when 
   const ev = (event: string, data: unknown) =>
     `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`;
   const sseNoTrailingNewline =
-    ev("response.created", { response: { id: "resp_x", status: "in_progress" } }) +
+    ev("response.created", {
+      response: { id: "resp_x", status: "in_progress" },
+    }) +
     ev("response.output_text.delta", { delta: "answer" }) +
     `event: response.completed\ndata: ${JSON.stringify({
       response: {
@@ -2138,7 +2143,7 @@ test("codex /v1/responses non-stream splices streamed output_item.done into comp
     status: "completed",
     call_id: "call_xyz",
     name: "get_weather",
-    arguments: "{\"city\":\"Tokyo\"}",
+    arguments: '{"city":"Tokyo"}',
   };
 
   const sseBody =
@@ -2191,10 +2196,7 @@ test("codex /v1/responses non-stream splices streamed output_item.done into comp
   assert.equal(jsonResp.body.status, "completed");
   // The handler-level splice: completed.response.output was [] but
   // we should have stitched the three streamed items in order.
-  assert.ok(
-    Array.isArray(jsonResp.body.output),
-    "output must be an array",
-  );
+  assert.ok(Array.isArray(jsonResp.body.output), "output must be an array");
   assert.equal(
     jsonResp.body.output.length,
     3,
@@ -2206,7 +2208,7 @@ test("codex /v1/responses non-stream splices streamed output_item.done into comp
   assert.equal(jsonResp.body.output[1].content[0].text, "PONG");
   assert.equal(jsonResp.body.output[2].type, "function_call");
   assert.equal(jsonResp.body.output[2].call_id, "call_xyz");
-  assert.equal(jsonResp.body.output[2].arguments, "{\"city\":\"Tokyo\"}");
+  assert.equal(jsonResp.body.output[2].arguments, '{"city":"Tokyo"}');
   // Usage from completed.response is preserved.
   assert.deepEqual(jsonResp.body.usage, {
     input_tokens: 17,
@@ -2289,8 +2291,5 @@ test("codex /v1/responses non-stream prefers upstream-populated output over stre
   // When upstream supplies output already, it wins.
   assert.equal(jsonResp.body.output.length, 1);
   assert.equal(jsonResp.body.output[0].id, "msg_completed");
-  assert.equal(
-    jsonResp.body.output[0].content[0].text,
-    "FROM_COMPLETED",
-  );
+  assert.equal(jsonResp.body.output[0].content[0].text, "FROM_COMPLETED");
 });
