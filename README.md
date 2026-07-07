@@ -49,6 +49,20 @@ auth2api supports these upstream providers:
 
 Pick the provider with `--provider=`. Default is `anthropic`.
 
+### Browser mode from the running server
+
+When the server is running locally, you can start OAuth from a normal browser page:
+
+```bash
+# Claude
+open http://127.0.0.1:8317/v1/claude-auth
+
+# Codex / ChatGPT
+open http://127.0.0.1:8317/v1/codex-auth
+```
+
+These routes are localhost-only and do not require an API key because they start an interactive browser login. Successful login writes the same token files as the CLI flow (`claude-<email>.json` or `codex-<email>.json`) and updates the running server immediately.
+
 ### Auto mode (requires local browser)
 
 ```bash
@@ -248,6 +262,8 @@ The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.re
 | `GET /admin/accounts`            | Account health/status (API key required)                              |
 | `GET /admin/stats`               | Per-client / per-account / per-API call statistics (API key required) |
 | `POST /admin/reload`             | Reload tokens from disk (API key required)                            |
+| `GET /v1/claude-auth`            | Start Claude OAuth login from a local browser                         |
+| `GET /v1/codex-auth`             | Start Codex OAuth login from a local browser                          |
 | `GET /health`                    | Health check                                                          |
 
 ## Docker
