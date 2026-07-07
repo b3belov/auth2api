@@ -4,12 +4,13 @@ port: 8317
 # Directory to store OAuth tokens
 auth-dir: "~/.auth2api"
 
-# API keys for client authentication (clients use these to access this proxy)
+# API keys for client authentication. Clients use these for /v1, /codex,
+# and /backend-api/codex. If omitted or empty, auth2api generates one on startup.
 api-keys:
-  - "your-api-key-here"
+  - "your-client-api-key-here"
 
 # Admin keys for /admin/accounts, /admin/stats, and /admin/reload.
-# If omitted, auth2api generates a separate admin key on startup.
+# If omitted or empty, auth2api generates a separate admin key on startup.
 admin-api-keys:
   - "your-admin-api-key-here"
 
@@ -27,7 +28,7 @@ timeouts:
 #   - upstream account (provider + email)
 #   - api endpoint x model x provider
 # Events are appended to <auth-dir>/stats.jsonl and replayed on startup.
-# Query the live snapshot via GET /admin/stats (requires API key).
+# Query the live snapshot via GET /admin/stats (requires admin API key).
 stats:
   enabled: true
 
