@@ -23,6 +23,7 @@ function makeConfig(authDir: string): Config {
     port: 0,
     "auth-dir": authDir,
     "api-keys": new Set(["test-key"]),
+    "admin-api-keys": new Set(["test-key"]),
     "body-limit": "200mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -199,6 +200,46 @@ async function requestText(options: {
 
     req.on("error", reject);
     if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+async function requestRaw(options: {
+  server: http.Server;
+  method: string;
+  path: string;
+  headers?: Record<string, string>;
+  body?: string;
+}): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+  const address = serverAddress(options.server);
+
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      {
+        host: "127.0.0.1",
+        port: address.port,
+        method: options.method,
+        path: options.path,
+        headers: options.headers || {},
+      },
+      (res) => {
+        let data = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => {
+          resolve({
+            status: res.statusCode || 0,
+            body: data,
+            headers: res.headers,
+          });
+        });
+      },
+    );
+
+    req.on("error", reject);
+    if (options.body) req.write(options.body);
     req.end();
   });
 }
@@ -1058,6 +1099,7 @@ test("POST /admin/reload requires the API key", async (t) => {
     path: "/admin/reload",
   });
   assert.equal(noAuth.status, 401);
+  assert.equal(noAuth.body.error.message, "Missing admin API key");
   const wrongAuth = await requestJson({
     server,
     method: "POST",
@@ -1065,6 +1107,123 @@ test("POST /admin/reload requires the API key", async (t) => {
     headers: { Authorization: "Bearer wrong" },
   });
   assert.equal(wrongAuth.status, 403);
+});
+
+test("POST /admin/reload accepts admin-api-keys for admin auth", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    {
+      ...makeConfig(authDir),
+      "api-keys": new Set(["client-key"]),
+      "admin-api-keys": new Set(["admin-key"]),
+    },
+    manager,
+  );
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const reloadResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/admin/reload",
+    headers: { Authorization: "Bearer admin-key" },
+  });
+
+  assert.equal(reloadResp.status, 200);
+  assert.ok(reloadResp.body.reloaded);
+});
+
+test("admin routes reject client-only keys when admin-api-keys are distinct", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    {
+      ...makeConfig(authDir),
+      "api-keys": new Set(["client-key"]),
+      "admin-api-keys": new Set(["admin-key"]),
+    },
+    manager,
+  );
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { Authorization: "Bearer client-key" },
+  });
+
+  assert.equal(resp.status, 403);
+});
+
+test("admin routes require admin-api-key, not client api-key", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    {
+      ...makeConfig(authDir),
+      "api-keys": new Set(["sk-client"]),
+      "admin-api-keys": new Set(["sk-admin"]),
+    },
+    manager,
+  );
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const clientKey = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { Authorization: "Bearer sk-client" },
+  });
+  assert.equal(clientKey.status, 403);
+
+  const adminKey = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { Authorization: "Bearer sk-admin" },
+  });
+  assert.equal(adminKey.status, 200);
+});
+
+test("protected routes reject missing auth before parsing oversized JSON", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    {
+      ...makeConfig(authDir),
+      "body-limit": "1kb",
+    },
+    manager,
+  );
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const hugeBody = JSON.stringify({ input: "x".repeat(4096) });
+  const result = await requestRaw({
+    server,
+    method: "POST",
+    path: "/v1/responses",
+    headers: {
+      "Content-Type": "application/json",
+      "Content-Length": Buffer.byteLength(hugeBody).toString(),
+    },
+    body: hugeBody,
+  });
+
+  assert.equal(result.status, 401);
+  assert.match(result.body, /Missing API key/);
 });
 
 test("count_tokens with empty body returns upstream client error, not network error", async (t) => {
@@ -1263,6 +1422,172 @@ test("codex responses upstream errors are normalized to OpenAI error shape", asy
   assert.deepEqual(resp.body, {
     error: { message: "bad codex request", type: "upstream_error" },
   });
+});
+
+test("codex retries another account when one account cannot serve the requested model", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "free-at",
+      refreshToken: "free-rt",
+      email: "free@example.com",
+      accountUuid: "free-account-id",
+      provider: "codex",
+    }),
+  );
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "pro-at",
+      refreshToken: "pro-rt",
+      email: "pro@example.com",
+      accountUuid: "pro-account-id",
+      provider: "codex",
+    }),
+  );
+
+  const seenAuthorizations: string[] = [];
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    const headers = init?.headers as Record<string, string>;
+    seenAuthorizations.push(headers.Authorization);
+
+    if (seenAuthorizations.length === 1) {
+      assert.equal(headers.Authorization, "Bearer free-at");
+      return new Response(
+        JSON.stringify({ detail: "model not supported for this account" }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    assert.equal(headers.Authorization, "Bearer pro-at");
+    return new Response(codexResponsesSseBody(["ok"]), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const result = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(result.status, 200);
+  assert.equal(result.body.choices[0].message.content, "ok");
+  assert.deepEqual(seenAuthorizations, ["Bearer free-at", "Bearer pro-at"]);
+});
+
+test("codex retries another account only for account-scoped errors, not unrelated upgrade validation errors", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "free-at",
+      refreshToken: "free-rt",
+      email: "free@example.com",
+      accountUuid: "free-account-id",
+      provider: "codex",
+    }),
+  );
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "pro-at",
+      refreshToken: "pro-rt",
+      email: "pro@example.com",
+      accountUuid: "pro-account-id",
+      provider: "codex",
+    }),
+  );
+
+  const seenAuthorizations: string[] = [];
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    const headers = init?.headers as Record<string, string>;
+    seenAuthorizations.push(headers.Authorization);
+
+    if (seenAuthorizations.length === 1) {
+      assert.equal(headers.Authorization, "Bearer free-at");
+      return new Response(
+        JSON.stringify({
+          detail: "The upgrade field is not allowed in metadata",
+        }),
+        {
+          status: 400,
+          headers: { "Content-Type": "application/json" },
+        },
+      );
+    }
+
+    assert.equal(headers.Authorization, "Bearer pro-at");
+    return new Response(codexResponsesSseBody(["unexpected retry"]), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const result = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      messages: [{ role: "user", content: "hi" }],
+      stream: false,
+    },
+  });
+
+  assert.equal(result.status, 400);
+  assert.deepEqual(result.body, {
+    error: {
+      message: "The upgrade field is not allowed in metadata",
+      type: "upstream_error",
+    },
+  });
+  assert.deepEqual(seenAuthorizations, ["Bearer free-at"]);
+
+  const accounts = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { Authorization: "Bearer test-key" },
+  });
+  const freeAccount = accounts.body.providers.codex.accounts.find(
+    (acct: any) => acct.email === "free@example.com",
+  );
+  assert.equal(freeAccount.available, true);
+  assert.equal(freeAccount.failureCount, 0);
+  assert.equal(freeAccount.totalFailures, 0);
 });
 
 test("cursor responses proxy converts minimal Connect-RPC stream to Responses SSE", async (t) => {

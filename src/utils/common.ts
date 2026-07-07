@@ -31,6 +31,24 @@ export function hashApiKey(apiKey: string): string {
   return crypto.createHash("sha256").update(apiKey).digest("hex");
 }
 
+function sha256Buffer(value: string): Buffer {
+  return crypto.createHash("sha256").update(value).digest();
+}
+
+export function hasTimingSafeApiKey(
+  provided: string,
+  allowed: Set<string>,
+): boolean {
+  if (!provided || allowed.size === 0) return false;
+  const providedHash = sha256Buffer(provided);
+  let matched = false;
+  for (const candidate of allowed) {
+    const candidateHash = sha256Buffer(candidate);
+    matched = crypto.timingSafeEqual(providedHash, candidateHash) || matched;
+  }
+  return matched;
+}
+
 // ── Device ID ──
 
 /**

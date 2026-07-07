@@ -5,7 +5,12 @@ import path from "node:path";
 import fs from "node:fs";
 import { EventEmitter } from "node:events";
 
-import { extractApiKey, hashApiKey, timeout } from "../src/utils/common";
+import {
+  extractApiKey,
+  hashApiKey,
+  hasTimingSafeApiKey,
+  timeout,
+} from "../src/utils/common";
 import { combineAbortSignals } from "../src/utils/abort";
 import { classifyFailure, proxyWithRetry } from "../src/utils/http";
 import { handleStreamingResponse } from "../src/upstream/streaming";
@@ -70,6 +75,14 @@ test("hashApiKey returns consistent sha256 hex", () => {
 
 test("hashApiKey returns different hashes for different keys", () => {
   assert.notEqual(hashApiKey("key-a"), hashApiKey("key-b"));
+});
+
+test("hasTimingSafeApiKey validates exact configured keys", () => {
+  const allowed = new Set(["sk-one", "sk-two"]);
+  assert.equal(hasTimingSafeApiKey("sk-one", allowed), true);
+  assert.equal(hasTimingSafeApiKey("sk-two", allowed), true);
+  assert.equal(hasTimingSafeApiKey("sk-three", allowed), false);
+  assert.equal(hasTimingSafeApiKey("", allowed), false);
 });
 
 test("timeout resolves after delay", async () => {
@@ -360,6 +373,38 @@ test("proxyWithRetry tags stats failure kind for upstream server errors", async 
   assert.equal(resp.locals.stats.failureKind, "server");
 });
 
+test("proxyWithRetry records classified account-scoped 403 once on final attempt", async () => {
+  const resp = makeMockResponse();
+  const account: any = { token: { email: "x@y.z" } };
+  const failures: Array<{ email: string; kind: string; detail?: string }> = [];
+  const manager: any = {
+    provider: "codex",
+    accountCount: 1,
+    getNextAccount: () => ({ account }),
+    recordAttempt: () => {},
+    recordFailure: (email: string, kind: string, detail?: string) => {
+      failures.push({ email, kind, detail });
+    },
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestProxy", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 1,
+    upstream: async () =>
+      new Response("requires chatgpt plus", { status: 403 }),
+    success: async () => {},
+    classifyAccountScopedError: () => "forbidden",
+  });
+
+  assert.equal(failures.length, 1);
+  assert.deepEqual(failures[0], {
+    email: "x@y.z",
+    kind: "forbidden",
+    detail: "requires chatgpt plus",
+  });
+});
+
 // ══════════════════════════════════════════════════
 // config.ts
 // ══════════════════════════════════════════════════
@@ -403,6 +448,67 @@ test("loadConfig normalizes debug mode", () => {
     assert.equal(config.debug, "errors"); // true → "errors"
   } finally {
     fs.unlinkSync(configPath);
+  }
+});
+
+test("loadConfig treats empty YAML as an empty config object", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-config-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(configPath, "");
+    const config = loadConfig(configPath);
+    assert.equal(config.host, "");
+    assert.equal(config.port, 8317);
+    assert.equal(config["api-keys"].size, 1);
+    assert.equal(config["admin-api-keys"].size, 1);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig normalizes scalar api-keys instead of splitting characters", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-config-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(
+      configPath,
+      ["api-keys: sk-client", "admin-api-keys: sk-admin"].join("\n"),
+    );
+    const config = loadConfig(configPath);
+    assert.deepEqual([...config["api-keys"]], ["sk-client"]);
+    assert.deepEqual([...config["admin-api-keys"]], ["sk-admin"]);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig rejects non-object YAML config", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-config-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(configPath, "- not\n- an\n- object\n");
+    assert.throws(
+      () => loadConfig(configPath),
+      /Config file must contain a YAML object/,
+    );
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
+test("loadConfig backfills missing admin-api-keys without reusing client keys", () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-config-"));
+  const configPath = path.join(tmpDir, "config.yaml");
+  try {
+    fs.writeFileSync(configPath, "api-keys:\n  - sk-client\n");
+    const config = loadConfig(configPath);
+    assert.deepEqual([...config["api-keys"]], ["sk-client"]);
+    assert.equal(config["admin-api-keys"].size, 1);
+    assert.equal(config["admin-api-keys"].has("sk-client"), false);
+    const persisted = fs.readFileSync(configPath, "utf-8");
+    assert.match(persisted, /admin-api-keys:/);
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
 
@@ -1225,6 +1331,7 @@ test("createServer stats endpoint records mounted route prefix", async () => {
       port: 0,
       "auth-dir": tmp,
       "api-keys": new Set(["sk-test"]),
+      "admin-api-keys": new Set(["sk-test"]),
       "body-limit": "1mb",
       cloaking: {},
       timeouts: {
@@ -1265,6 +1372,7 @@ test("createServer stats records client disconnects on close", async () => {
       port: 0,
       "auth-dir": tmp,
       "api-keys": new Set(["sk-test"]),
+      "admin-api-keys": new Set(["sk-test"]),
       "body-limit": "1mb",
       cloaking: {},
       timeouts: {

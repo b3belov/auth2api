@@ -507,6 +507,7 @@ export class AccountManager {
   }
 
   startAutoRefresh(): void {
+    if (this.refreshTimer) return;
     const timer = setInterval(
       () =>
         this.refreshAll().catch((err) =>
@@ -532,6 +533,7 @@ export class AccountManager {
   }
 
   startStatsLogger(): void {
+    if (this.statsTimer) return;
     const timer = setInterval(() => this.logStats(), 5 * 60 * 1000);
     timer.unref();
     this.statsTimer = timer;

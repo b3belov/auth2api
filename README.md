@@ -89,7 +89,7 @@ You can run `--login` multiple times to add additional accounts (per provider). 
 node dist/index.js
 ```
 
-The server starts on `http://127.0.0.1:8317` by default. On first run, an API key is auto-generated and saved to `config.yaml`.
+The server starts on `http://127.0.0.1:8317` by default. On first run, client and admin API keys are auto-generated and saved to `config.yaml`.
 
 ## Configuration
 
@@ -102,7 +102,10 @@ port: 8317
 auth-dir: "~/.auth2api" # where OAuth tokens are stored
 
 api-keys:
-  - "your-api-key-here" # clients use this to authenticate
+  - "your-client-api-key-here" # clients use these for /v1, /codex, and /backend-api/codex
+
+admin-api-keys:
+  - "your-admin-api-key-here" # operators use these for /admin/accounts, /admin/stats, and /admin/reload
 
 body-limit: "200mb" # maximum JSON request body size, useful for large-context usage
 
@@ -124,6 +127,8 @@ cloaking:
 
 debug: "off" # off | errors | verbose
 ```
+
+If either key list is omitted or empty, auth2api generates a fresh key for that list and saves it to `config.yaml`. Admin keys are intentionally separate from client keys so application clients cannot inspect account state or trigger reloads.
 
 `reasoning` sets provider-specific defaults only when the client did not already request reasoning. Anthropic-bound requests use `reasoning.anthropic` (`none`, `minimal`, `low`, `medium`, `high`, `max`); Codex-bound requests use `reasoning.codex` (`minimal`, `low`, `medium`, `high`).
 
@@ -150,10 +155,10 @@ Use any OpenAI-compatible client pointed at `http://127.0.0.1:8317`:
 
 ```bash
 curl http://127.0.0.1:8317/v1/chat/completions \
-  -H "Authorization: Bearer <your-api-key>" \
+  -H "Authorization: Bearer <your-client-api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-6",
+    "model": "claude-sonnet-5",
     "messages": [{"role": "user", "content": "Hello!"}],
     "max_tokens": 1024
   }'
@@ -161,13 +166,19 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 
 ### Available models
 
-`GET /v1/models` lists only models for providers you've actually logged in to. The codex list is **fetched live** from `chatgpt.com/backend-api/codex/models` (cached 5 minutes, ETag-aware) so it always matches what your account can actually serve. Cursor models are fetched from Cursor's internal AvailableModels endpoint when possible, with a small fallback list. The current ChatGPT-account-supported set at the time of writing:
+`GET /v1/models` lists only models for providers you've actually logged in to. The codex list is **fetched live** from `chatgpt.com/backend-api/codex/models` (cached 5 minutes, ETag-aware) so it always matches what your account can actually serve. Cursor models are fetched from Cursor's internal AvailableModels endpoint when possible, with a small fallback list. The table below combines the currently advertised Anthropic models, representative Codex models, and Cursor fallback examples:
 
 | Model ID                                             | Provider  | Description                                        |
 | ---------------------------------------------------- | --------- | -------------------------------------------------- |
+| `claude-sonnet-5`                                    | anthropic | Claude Sonnet 5                                    |
+| `claude-fable-5`                                     | anthropic | Claude Fable 5                                     |
+| `claude-mythos-preview`                              | anthropic | Claude Mythos preview                              |
+| `claude-opus-4-8`                                    | anthropic | Claude Opus 4.8                                    |
 | `claude-opus-4-7`                                    | anthropic | Claude Opus 4.7                                    |
 | `claude-opus-4-6`                                    | anthropic | Claude Opus 4.6                                    |
+| `claude-opus-4-5-20251101`                           | anthropic | Claude Opus 4.5                                    |
 | `claude-sonnet-4-6`                                  | anthropic | Claude Sonnet 4.6                                  |
+| `claude-sonnet-4-5-20250929`                         | anthropic | Claude Sonnet 4.5                                  |
 | `claude-haiku-4-5-20251001`                          | anthropic | Claude Haiku 4.5                                   |
 | `claude-haiku-4-5`                                   | anthropic | Alias for Claude Haiku 4.5                         |
 | `gpt-5.5`                                            | codex     | GPT-5.5 (reasoning model)                          |
@@ -183,10 +194,12 @@ curl http://127.0.0.1:8317/v1/chat/completions \
 Short convenience aliases accepted by auth2api:
 
 - `opus` -> `claude-opus-4-7`
-- `sonnet` -> `claude-sonnet-4-6`
+- `sonnet` -> `claude-sonnet-5`
 - `haiku` -> `claude-haiku-4-5-20251001`
+- `fable` -> `claude-fable-5`
+- `mythos` -> `claude-mythos-preview`
 
-Routing: requests are dispatched to the matching pool by model name. `claude-*` and the bare aliases (`opus`/`sonnet`/`haiku`) hit your Claude account; `gpt-5*`, `o\d` (`o3`, `o4-mini`, …), and `codex-*` hit your Codex account; `cursor-*` and `cr/*` hit your Cursor account. Other model families (`gpt-3.5-*`, `gpt-4*`, …) are not served by either backend and route to anthropic by default. If you haven't logged into the matching provider, the request returns `503 no_account_for_provider` with the exact `--login` command to fix it.
+Routing: requests are dispatched to the matching pool by model name. `claude-*` and the bare aliases (`opus`/`sonnet`/`haiku`/`fable`/`mythos`) hit your Claude account; `gpt-5*`, `o\d` (`o3`, `o4-mini`, …), and `codex-*` hit your Codex account; `cursor-*` and `cr/*` hit your Cursor account. Other model families (`gpt-3.5-*`, `gpt-4*`, …) are not served by either backend and route to anthropic by default. If you haven't logged into the matching provider, the request returns `503 no_account_for_provider` with the exact `--login` command to fix it.
 
 #### "Cursor exclusive" mode (zero-config Claude Code / OpenAI clients)
 
@@ -245,9 +258,9 @@ The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.re
 | `POST /v1/messages`              | Claude native passthrough                                             |
 | `POST /v1/messages/count_tokens` | Claude token counting                                                 |
 | `GET /v1/models`                 | List available models                                                 |
-| `GET /admin/accounts`            | Account health/status (API key required)                              |
-| `GET /admin/stats`               | Per-client / per-account / per-API call statistics (API key required) |
-| `POST /admin/reload`             | Reload tokens from disk (API key required)                            |
+| `GET /admin/accounts`            | Account health/status (admin API key required)                        |
+| `GET /admin/stats`               | Per-client / per-account / per-API call statistics (admin API key required) |
+| `POST /admin/reload`             | Reload tokens from disk (admin API key required)                      |
 | `GET /health`                    | Health check                                                          |
 
 ## Docker
@@ -259,10 +272,12 @@ docker build -t auth2api .
 # Run (mount your config and token directory)
 docker run -d \
   -p 8317:8317 \
-  -v ~/.auth2api:/data \
+  -v ~/.auth2api:/root/.auth2api \
   -v ./config.yaml:/config/config.yaml \
   auth2api
 ```
+
+Inside the container, the default `auth-dir: "~/.auth2api"` resolves to `/root/.auth2api`; keep the volume mounted there unless you explicitly set `auth-dir: "/data"` in your config and mount the token volume at `/data`.
 
 Or with docker-compose:
 
@@ -276,7 +291,7 @@ Set `ANTHROPIC_BASE_URL` to point Claude Code at auth2api:
 
 ```bash
 ANTHROPIC_BASE_URL=http://127.0.0.1:8317 \
-ANTHROPIC_API_KEY=<your-api-key> \
+ANTHROPIC_API_KEY=<your-client-api-key> \
 claude
 ```
 
@@ -294,11 +309,11 @@ auth2api supports multiple Claude OAuth accounts. Each account is stored as a se
 
 ## Admin status
 
-Use `/admin/accounts` with your configured API key to inspect the current account states:
+Use `/admin/accounts` with an admin API key to inspect the current account states:
 
 ```bash
 curl http://127.0.0.1:8317/admin/accounts \
-  -H "Authorization: Bearer <your-api-key>"
+  -H "Authorization: Bearer <your-admin-api-key>"
 ```
 
 Response shape (one entry per logged-in provider):
@@ -323,7 +338,7 @@ You can also trigger a reload manually (e.g. on Windows, in containers, or after
 
 ```bash
 curl -X POST http://127.0.0.1:8317/admin/reload \
-  -H "Authorization: Bearer <your-api-key>"
+  -H "Authorization: Bearer <your-admin-api-key>"
 ```
 
 Response shape:
@@ -342,7 +357,7 @@ Reload semantics are **upsert only**: new token files on disk are added to the i
 
 ### Call statistics: `/admin/stats`
 
-Every request that passes API-key auth is appended as a single line to `<auth-dir>/stats.jsonl` and added to an in-memory aggregate. On startup the aggregate is rebuilt by replaying the JSONL, so the snapshot survives restarts.
+Every request that passes client or admin API-key auth is appended as a single line to `<auth-dir>/stats.jsonl` and added to an in-memory aggregate. On startup the aggregate is rebuilt by replaying the JSONL, so the snapshot survives restarts.
 
 `GET /admin/stats` returns three independent aggregate views plus a global `totals`:
 
@@ -352,7 +367,7 @@ Every request that passes API-key auth is appended as a single line to `<auth-di
 
 ```bash
 curl http://127.0.0.1:8317/admin/stats \
-  -H "Authorization: Bearer <your-api-key>"
+  -H "Authorization: Bearer <your-admin-api-key>"
 ```
 
 ```json
@@ -372,7 +387,7 @@ curl http://127.0.0.1:8317/admin/stats \
     "anthropic:alice@example.com": { "provider": "anthropic", "email": "alice@example.com", "requests": 100, ... }
   },
   "byApi": {
-    "POST /v1/chat/completions|claude-sonnet-4-6|anthropic": { "endpoint": "POST /v1/chat/completions", "model": "claude-sonnet-4-6", "provider": "anthropic", "requests": 80, ... }
+    "POST /v1/chat/completions|claude-sonnet-5|anthropic": { "endpoint": "POST /v1/chat/completions", "model": "claude-sonnet-5", "provider": "anthropic", "requests": 80, ... }
   },
   "totals": { "requests": 142, "successes": 140, "failures": 2, ... },
   "generated_at": "2026-05-09T12:00:00Z"
@@ -390,7 +405,7 @@ Failure modes of the auto-notify (printed by `--login`):
 
 - `Notified running auth2api server to reload tokens.` — success, server picked up the new token.
 - `(no auth2api server detected at <host>:<port> — token saved, will be loaded next start)` — connection refused / timeout. Common case when no server is running; not an error.
-- `auth2api server is running but rejected the reload (HTTP 401/403). The api-keys in config.yaml may differ from the running server's; restart the server to pick up the new key set.` — actionable: either edit your config back to match, or restart so the server picks up the new key set.
+- `auth2api server is running but rejected the reload (HTTP 401/403). The admin-api-keys in config.yaml may differ from the running server's; restart the server to pick up the new key set.` — actionable: either edit your config back to match, or restart so the server picks up the new key set.
 
 ## Tests
 
