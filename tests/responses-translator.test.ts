@@ -580,6 +580,104 @@ test("responsesSSEToChat: tool_call arg deltas resolve when item_id differs from
   assert.match(all, /"finish_reason":"tool_calls"/);
 });
 
+test("responsesSSEToChat: defers nameless tool_call until output_item.done supplies name", () => {
+  const state = makeResponsesToChatState("gpt-5.5-medium");
+  const chunks = [
+    ...responsesSSEToChat(
+      "response.output_item.added",
+      {
+        item: {
+          id: "fc_late",
+          call_id: "call_late",
+          type: "function_call",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToChat(
+      "response.function_call_arguments.delta",
+      { item_id: "fc_late", delta: '{"city":"' },
+      state,
+    ),
+    ...responsesSSEToChat(
+      "response.function_call_arguments.delta",
+      { item_id: "fc_late", delta: 'Kyiv"}' },
+      state,
+    ),
+    ...responsesSSEToChat(
+      "response.output_item.done",
+      {
+        item: {
+          id: "fc_late",
+          call_id: "call_late",
+          type: "function_call",
+          name: "get_weather",
+          arguments: '{"city":"Kyiv"}',
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToChat(
+      "response.completed",
+      { response: { status: "completed" } },
+      state,
+    ),
+  ];
+  const all = chunks.join("");
+
+  assert.doesNotMatch(all, /"name":""/);
+  assert.match(all, /"id":"call_late"/);
+  assert.match(all, /"name":"get_weather"/);
+  assert.match(all, /"arguments":"\{\\"city\\":\\"Kyiv\\"\}"/);
+  assert.match(all, /"finish_reason":"tool_calls"/);
+});
+
+test("responsesSSEToChat: emits stream error when completed function_call has no name", () => {
+  const state = makeResponsesToChatState("gpt-5.5-medium");
+  const chunks = [
+    ...responsesSSEToChat(
+      "response.output_item.added",
+      {
+        item: {
+          id: "fc_bad",
+          call_id: "call_bad",
+          type: "function_call",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToChat(
+      "response.function_call_arguments.delta",
+      { item_id: "fc_bad", delta: "{}" },
+      state,
+    ),
+    ...responsesSSEToChat(
+      "response.output_item.done",
+      {
+        item: {
+          id: "fc_bad",
+          call_id: "call_bad",
+          type: "function_call",
+          name: "",
+          arguments: "{}",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToChat(
+      "response.completed",
+      { response: { status: "completed" } },
+      state,
+    ),
+  ];
+  const all = chunks.join("");
+
+  assert.doesNotMatch(all, /"tool_calls"/);
+  assert.match(all, /"code":"invalid_tool_call_name"/);
+  assert.match(all, /function_call name must be a non-empty string/);
+  assert.match(all, /data: \[DONE\]/);
+});
+
 test("responsesSSEToAnthropic: tool_use input_json_delta resolves when item_id differs from call_id (real codex shape)", () => {
   const state = makeResponsesToAnthropicState("claude-sonnet-4-5");
   const out = [
@@ -617,6 +715,111 @@ test("responsesSSEToAnthropic: tool_use input_json_delta resolves when item_id d
     /"type":"input_json_delta","partial_json":"\{\\"city\\":\\"Tokyo\\"\}"/,
   );
   assert.match(all, /"stop_reason":"tool_use"/);
+});
+
+test("responsesSSEToAnthropic: defers nameless tool_use until output_item.done supplies name", () => {
+  const state = makeResponsesToAnthropicState("claude-sonnet-4-5");
+  const out = [
+    ...responsesSSEToAnthropic("response.created", {}, state),
+    ...responsesSSEToAnthropic(
+      "response.output_item.added",
+      {
+        item: {
+          id: "fc_late",
+          call_id: "call_late",
+          type: "function_call",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.function_call_arguments.delta",
+      { item_id: "fc_late", delta: '{"city":"' },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.function_call_arguments.delta",
+      { item_id: "fc_late", delta: 'Kyiv"}' },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.output_item.done",
+      {
+        item: {
+          id: "fc_late",
+          call_id: "call_late",
+          type: "function_call",
+          name: "get_weather",
+          arguments: '{"city":"Kyiv"}',
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.completed",
+      { response: { status: "completed" } },
+      state,
+    ),
+  ];
+  const all = out.join("");
+
+  assert.doesNotMatch(all, /"name":""/);
+  assert.match(
+    all,
+    /"content_block":\{"type":"tool_use","id":"call_late","name":"get_weather"/,
+  );
+  assert.match(
+    all,
+    /"type":"input_json_delta","partial_json":"\{\\"city\\":\\"Kyiv\\"\}"/,
+  );
+  assert.match(all, /"stop_reason":"tool_use"/);
+});
+
+test("responsesSSEToAnthropic: emits error when completed tool_use has no name", () => {
+  const state = makeResponsesToAnthropicState("claude-sonnet-4-5");
+  const out = [
+    ...responsesSSEToAnthropic("response.created", {}, state),
+    ...responsesSSEToAnthropic(
+      "response.output_item.added",
+      {
+        item: {
+          id: "fc_bad",
+          call_id: "call_bad",
+          type: "function_call",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.function_call_arguments.delta",
+      { item_id: "fc_bad", delta: "{}" },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.output_item.done",
+      {
+        item: {
+          id: "fc_bad",
+          call_id: "call_bad",
+          type: "function_call",
+          name: " ",
+          arguments: "{}",
+        },
+      },
+      state,
+    ),
+    ...responsesSSEToAnthropic(
+      "response.completed",
+      { response: { status: "completed" } },
+      state,
+    ),
+  ];
+  const all = out.join("");
+
+  assert.doesNotMatch(all, /"type":"tool_use"/);
+  assert.match(all, /"type":"error"/);
+  assert.match(all, /"type":"invalid_request_error"/);
+  assert.match(all, /function_call name must be a non-empty string/);
 });
 
 // ───────────────── responsesSSEToAnthropic (streaming) ─────────────────

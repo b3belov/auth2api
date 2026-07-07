@@ -38,8 +38,8 @@ stats:
 reasoning:
   # Anthropic/Claude-bound requests: none | minimal | low | medium | high | max
   # anthropic: "medium"
-  # Codex/OpenAI Responses-bound requests: minimal | low | medium | high
-  # codex: "high"
+  # Codex/OpenAI Responses-bound requests: minimal | low | medium | high | xhigh
+  # codex: "xhigh"
 
 # Debug logging level:
 # off = no extra logs

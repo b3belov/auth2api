@@ -644,13 +644,13 @@ test("loadConfig normalizes provider reasoning levels", () => {
         "  - sk-test",
         "reasoning:",
         "  anthropic: max",
-        "  codex: high",
+        "  codex: xhigh",
       ].join("\n"),
     );
 
     const config = loadConfig(configPath);
 
-    assert.deepEqual(config.reasoning, { anthropic: "max", codex: "high" });
+    assert.deepEqual(config.reasoning, { anthropic: "max", codex: "xhigh" });
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

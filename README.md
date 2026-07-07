@@ -131,8 +131,8 @@ timeouts:
 reasoning:
   # Anthropic/Claude-bound requests: none | minimal | low | medium | high | max
   # anthropic: "medium"
-  # Codex/OpenAI Responses-bound requests: minimal | low | medium | high
-  # codex: "high"
+  # Codex/OpenAI Responses-bound requests: minimal | low | medium | high | xhigh
+  # codex: "xhigh"
 
 # Request fingerprinting — controls how auth2api mimics Claude Code CLI
 cloaking:
@@ -144,7 +144,7 @@ debug: "off" # off | errors | verbose
 
 If either key list is omitted or empty, auth2api generates a fresh key for that list and saves it to `config.yaml`. Admin keys are intentionally separate from client keys so application clients cannot inspect account state or trigger reloads.
 
-`reasoning` sets provider-specific defaults only when the client did not already request reasoning. Anthropic-bound requests use `reasoning.anthropic` (`none`, `minimal`, `low`, `medium`, `high`, `max`); Codex-bound requests use `reasoning.codex` (`minimal`, `low`, `medium`, `high`).
+`reasoning` sets provider-specific defaults only when the client did not already request reasoning. Anthropic-bound requests use `reasoning.anthropic` (`none`, `minimal`, `low`, `medium`, `high`, `max`); Codex-bound requests use `reasoning.codex` (`minimal`, `low`, `medium`, `high`, `xhigh`).
 
 `debug` supports three levels:
 
@@ -303,7 +303,10 @@ docker build -t auth2api .
 
 # Run (mount your config and token directory)
 docker run -d \
-  -p 8317:8317 \
+  -p 127.0.0.1:8317:8317 \
+  -p 127.0.0.1:1455:1455 \
+  -p 127.0.0.1:54545:54545 \
+  -e AUTH2API_DOCKER_BROWSER_OAUTH=1 \
   -v ~/.auth2api:/root/.auth2api \
   -v ./config.yaml:/config/config.yaml \
   auth2api

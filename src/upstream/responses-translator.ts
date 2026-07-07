@@ -586,6 +586,17 @@ export function responsesToAnthropicMessage(resp: any, model: string): any {
 // 5. Responses SSE → OpenAI Chat Completions SSE
 // ─────────────────────────────────────────────────────────────────────
 
+interface PendingChatToolCall {
+  index: number;
+  callId: string;
+  argsBuf: string;
+  started: boolean;
+}
+
+function validToolName(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
 export interface ResponsesToChatState {
   id: string;
   created: number;
@@ -599,8 +610,10 @@ export interface ResponsesToChatState {
   // public `call_…`. Lets argument deltas resolve their slot
   // without polluting `toolCallIndices` with duplicates.
   itemIdToCallId: Map<string, string>;
+  pendingToolCalls: Map<string, PendingChatToolCall>;
   nextToolIndex: number;
   finishReason: string;
+  terminalErrorSent: boolean;
 }
 
 export function makeResponsesToChatState(model: string): ResponsesToChatState {
@@ -612,8 +625,10 @@ export function makeResponsesToChatState(model: string): ResponsesToChatState {
     rolePrimerSent: false,
     toolCallIndices: new Map(),
     itemIdToCallId: new Map(),
+    pendingToolCalls: new Map(),
     nextToolIndex: 0,
     finishReason: "stop",
+    terminalErrorSent: false,
   };
 }
 
@@ -637,6 +652,98 @@ function ensureRolePrimer(state: ResponsesToChatState): string[] {
   if (state.rolePrimerSent) return [];
   state.rolePrimerSent = true;
   return [buildChatChunk(state, { role: "assistant", content: "" })];
+}
+
+function chatStreamToolNameError(state: ResponsesToChatState): string[] {
+  if (state.terminalErrorSent) return [];
+  state.terminalErrorSent = true;
+  return [
+    `data: ${JSON.stringify({
+      error: {
+        message: "function_call name must be a non-empty string",
+        type: "invalid_request_error",
+        code: "invalid_tool_call_name",
+      },
+    })}\n\n`,
+    "data: [DONE]\n\n",
+  ];
+}
+
+function registerChatToolCall(
+  state: ResponsesToChatState,
+  item: any,
+): PendingChatToolCall | null {
+  if (!item?.call_id) return null;
+  const existingIndex = state.toolCallIndices.get(item.call_id);
+  if (existingIndex !== undefined) {
+    return (
+      state.pendingToolCalls.get(item.call_id) || {
+        index: existingIndex,
+        callId: item.call_id,
+        argsBuf: "",
+        started: true,
+      }
+    );
+  }
+
+  const tool: PendingChatToolCall = {
+    index: state.nextToolIndex++,
+    callId: item.call_id,
+    argsBuf: "",
+    started: false,
+  };
+  state.toolCallIndices.set(item.call_id, tool.index);
+  state.pendingToolCalls.set(item.call_id, tool);
+  if (item.id && item.id !== item.call_id) {
+    state.itemIdToCallId.set(item.id, item.call_id);
+  }
+  state.finishReason = "tool_calls";
+  return tool;
+}
+
+function resolveChatCallId(
+  state: ResponsesToChatState,
+  data: any,
+): string | undefined {
+  const ref = data?.item_id || data?.call_id;
+  if (!ref) return undefined;
+  return state.toolCallIndices.has(ref) ? ref : state.itemIdToCallId.get(ref);
+}
+
+function startChatToolCall(
+  state: ResponsesToChatState,
+  tool: PendingChatToolCall,
+  name: string,
+  args: string,
+): string[] {
+  tool.started = true;
+  state.pendingToolCalls.delete(tool.callId);
+  const out = [
+    ...ensureRolePrimer(state),
+    buildChatChunk(state, {
+      tool_calls: [
+        {
+          index: tool.index,
+          id: tool.callId,
+          type: "function",
+          function: { name, arguments: "" },
+        },
+      ],
+    }),
+  ];
+  if (args) {
+    out.push(
+      buildChatChunk(state, {
+        tool_calls: [
+          {
+            index: tool.index,
+            function: { arguments: args },
+          },
+        ],
+      }),
+    );
+  }
+  return out;
 }
 
 export function responsesSSEToChat(
@@ -666,48 +773,28 @@ export function responsesSSEToChat(
     case "response.output_item.added": {
       const item = data?.item;
       if (item?.type === "function_call" && item.call_id) {
-        if (!state.toolCallIndices.has(item.call_id)) {
-          const idx = state.nextToolIndex++;
-          // Codex's `output_item.added` carries both `item.id`
-          // (e.g. `fc_…`) and `item.call_id` (e.g. `call_…`).
-          // Subsequent `function_call_arguments.delta` events
-          // reference the item via `item_id` (= `item.id`), NOT
-          // `item.call_id`. Keep the chat slot map keyed only by
-          // `call_id` and use `itemIdToCallId` for the
-          // delta-event lookup so any future iteration over
-          // `toolCallIndices` doesn't see duplicates.
-          state.toolCallIndices.set(item.call_id, idx);
-          if (item.id && item.id !== item.call_id) {
-            state.itemIdToCallId.set(item.id, item.call_id);
-          }
-          state.finishReason = "tool_calls";
-          return [
-            ...ensureRolePrimer(state),
-            buildChatChunk(state, {
-              tool_calls: [
-                {
-                  index: idx,
-                  id: item.call_id,
-                  type: "function",
-                  function: { name: item.name, arguments: "" },
-                },
-              ],
-            }),
-          ];
-        }
+        if (state.toolCallIndices.has(item.call_id)) return [];
+        const tool = registerChatToolCall(state, item);
+        if (!tool) return [];
+        const name = validToolName(item.name);
+        if (!name) return [];
+        return startChatToolCall(state, tool, name, "");
       }
       return [];
     }
 
     case "response.function_call_arguments.delta": {
-      const ref = data?.item_id || data?.call_id;
-      const callId = ref
-        ? state.toolCallIndices.has(ref)
-          ? ref
-          : state.itemIdToCallId.get(ref)
-        : undefined;
-      const idx = callId ? state.toolCallIndices.get(callId) : undefined;
-      if (idx === undefined || typeof data?.delta !== "string") return [];
+      const callId = resolveChatCallId(state, data);
+      if (!callId || typeof data?.delta !== "string") return [];
+      const idx = state.toolCallIndices.get(callId);
+      if (idx === undefined) return [];
+
+      const pending = state.pendingToolCalls.get(callId);
+      if (pending && !pending.started) {
+        pending.argsBuf += data.delta;
+        return [];
+      }
+
       return [
         buildChatChunk(state, {
           tool_calls: [
@@ -720,7 +807,25 @@ export function responsesSSEToChat(
       ];
     }
 
+    case "response.output_item.done": {
+      const item = data?.item;
+      if (item?.type !== "function_call" || !item.call_id) return [];
+      const tool = state.pendingToolCalls.get(item.call_id);
+      if (!tool || tool.started) return [];
+
+      const name = validToolName(item.name);
+      if (!name) return chatStreamToolNameError(state);
+
+      const args =
+        typeof item.arguments === "string" ? item.arguments : tool.argsBuf;
+      return startChatToolCall(state, tool, name, args);
+    }
+
     case "response.completed": {
+      if (state.terminalErrorSent) return [];
+      if ([...state.pendingToolCalls.values()].some((tool) => !tool.started)) {
+        return chatStreamToolNameError(state);
+      }
       const status = data?.response?.status;
       if (status === "incomplete" && state.finishReason === "stop") {
         state.finishReason = "length";
@@ -733,6 +838,7 @@ export function responsesSSEToChat(
     }
 
     case "response.failed": {
+      if (state.terminalErrorSent) return [];
       const msg = data?.response?.error?.message || "Upstream error";
       return [
         `data: ${JSON.stringify({
@@ -751,6 +857,13 @@ export function responsesSSEToChat(
 // 6. Responses SSE → Anthropic Messages SSE
 // ─────────────────────────────────────────────────────────────────────
 
+interface PendingAnthropicToolBlock {
+  index: number;
+  callId: string;
+  argsBuf: string;
+  started: boolean;
+}
+
 export interface ResponsesToAnthropicState {
   messageId: string;
   model: string;
@@ -764,6 +877,7 @@ export interface ResponsesToAnthropicState {
   textOpen: boolean;
   textIndex: number;
   toolBlocks: Map<string, { index: number; name: string; argsBuf: string }>;
+  pendingToolBlocks: Map<string, PendingAnthropicToolBlock>;
   // Maps codex's internal `fc_…` item id (used in
   // `function_call_arguments.delta` events) to the public `call_…`
   // id we key `toolBlocks` by. Kept separate so iterating
@@ -773,6 +887,7 @@ export interface ResponsesToAnthropicState {
   nextBlockIndex: number;
   messageStartSent: boolean;
   stopReason: string;
+  terminalErrorSent: boolean;
 }
 
 export function makeResponsesToAnthropicState(
@@ -789,10 +904,12 @@ export function makeResponsesToAnthropicState(
     textOpen: false,
     textIndex: -1,
     toolBlocks: new Map(),
+    pendingToolBlocks: new Map(),
     itemIdToCallId: new Map(),
     nextBlockIndex: 0,
     messageStartSent: false,
     stopReason: "end_turn",
+    terminalErrorSent: false,
   };
 }
 
@@ -818,6 +935,124 @@ function ensureMessageStart(state: ResponsesToAnthropicState): string[] {
       },
     }),
   ];
+}
+
+function anthropicStreamToolNameError(
+  state: ResponsesToAnthropicState,
+): string[] {
+  if (state.terminalErrorSent) return [];
+  state.terminalErrorSent = true;
+  const out = ensureMessageStart(state);
+  out.push(...closeOpenBlocks(state));
+  out.push(
+    sseEvent("error", {
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "function_call name must be a non-empty string",
+      },
+    }),
+  );
+  return out;
+}
+
+function resolveAnthropicCallId(
+  state: ResponsesToAnthropicState,
+  data: any,
+): string | undefined {
+  const ref = data?.item_id || data?.call_id;
+  if (!ref) return undefined;
+  return state.toolBlocks.has(ref) || state.pendingToolBlocks.has(ref)
+    ? ref
+    : state.itemIdToCallId.get(ref);
+}
+
+function registerAnthropicToolBlock(
+  state: ResponsesToAnthropicState,
+  item: any,
+): PendingAnthropicToolBlock | null {
+  if (!item?.call_id) return null;
+  const existing = state.pendingToolBlocks.get(item.call_id);
+  if (existing) return existing;
+  const started = state.toolBlocks.get(item.call_id);
+  if (started) {
+    return {
+      index: started.index,
+      callId: item.call_id,
+      argsBuf: started.argsBuf,
+      started: true,
+    };
+  }
+
+  const pending: PendingAnthropicToolBlock = {
+    index: state.nextBlockIndex++,
+    callId: item.call_id,
+    argsBuf: "",
+    started: false,
+  };
+  state.pendingToolBlocks.set(item.call_id, pending);
+  if (item.id && item.id !== item.call_id) {
+    state.itemIdToCallId.set(item.id, item.call_id);
+  }
+  state.stopReason = "tool_use";
+  return pending;
+}
+
+function startAnthropicToolBlock(
+  state: ResponsesToAnthropicState,
+  tool: PendingAnthropicToolBlock,
+  name: string,
+  args: string,
+): string[] {
+  const out = ensureMessageStart(state);
+  if (state.thinkingOpen) {
+    out.push(
+      sseEvent("content_block_stop", {
+        type: "content_block_stop",
+        index: state.thinkingIndex,
+      }),
+    );
+    state.thinkingOpen = false;
+  }
+  if (state.textOpen) {
+    out.push(
+      sseEvent("content_block_stop", {
+        type: "content_block_stop",
+        index: state.textIndex,
+      }),
+    );
+    state.textOpen = false;
+  }
+
+  tool.started = true;
+  state.pendingToolBlocks.delete(tool.callId);
+  state.toolBlocks.set(tool.callId, {
+    index: tool.index,
+    name,
+    argsBuf: args,
+  });
+  out.push(
+    sseEvent("content_block_start", {
+      type: "content_block_start",
+      index: tool.index,
+      content_block: {
+        type: "tool_use",
+        id: tool.callId,
+        name,
+        input: {},
+      },
+    }),
+  );
+  if (args) {
+    out.push(
+      sseEvent("content_block_delta", {
+        type: "content_block_delta",
+        index: tool.index,
+        delta: { type: "input_json_delta", partial_json: args },
+      }),
+    );
+  }
+  return out;
 }
 
 function closeOpenBlocks(state: ResponsesToAnthropicState): string[] {
@@ -849,6 +1084,7 @@ function closeOpenBlocks(state: ResponsesToAnthropicState): string[] {
     );
   }
   state.toolBlocks.clear();
+  state.pendingToolBlocks.clear();
   return out;
 }
 
@@ -927,65 +1163,27 @@ export function responsesSSEToAnthropic(
     case "response.output_item.added": {
       const item = data?.item;
       if (item?.type === "function_call" && item.call_id) {
-        const out = ensureMessageStart(state);
-        // Tool blocks come after text/reasoning per Anthropic convention.
-        if (state.thinkingOpen) {
-          out.push(
-            sseEvent("content_block_stop", {
-              type: "content_block_stop",
-              index: state.thinkingIndex,
-            }),
-          );
-          state.thinkingOpen = false;
-        }
-        if (state.textOpen) {
-          out.push(
-            sseEvent("content_block_stop", {
-              type: "content_block_stop",
-              index: state.textIndex,
-            }),
-          );
-          state.textOpen = false;
-        }
-        if (!state.toolBlocks.has(item.call_id)) {
-          const idx = state.nextBlockIndex++;
-          // toolBlocks is keyed by the public `call_id` only so the
-          // close-blocks iteration emits one `content_block_stop`
-          // per tool. The internal `fc_…` id used by subsequent
-          // `function_call_arguments.delta` events is recorded in
-          // a sidecar map (`itemIdToCallId`) so the delta lookup
-          // can resolve back to the same block.
-          const block = { index: idx, name: item.name, argsBuf: "" };
-          state.toolBlocks.set(item.call_id, block);
-          if (item.id && item.id !== item.call_id) {
-            state.itemIdToCallId.set(item.id, item.call_id);
-          }
-          state.stopReason = "tool_use";
-          out.push(
-            sseEvent("content_block_start", {
-              type: "content_block_start",
-              index: idx,
-              content_block: {
-                type: "tool_use",
-                id: item.call_id,
-                name: item.name,
-                input: {},
-              },
-            }),
-          );
-        }
-        return out;
+        if (state.toolBlocks.has(item.call_id)) return [];
+        const tool = registerAnthropicToolBlock(state, item);
+        if (!tool) return [];
+        const name = validToolName(item.name);
+        if (!name) return [];
+        return startAnthropicToolBlock(state, tool, name, "");
       }
       return [];
     }
 
     case "response.function_call_arguments.delta": {
-      const ref = data?.item_id || data?.call_id;
-      if (!ref) return [];
-      const callId = state.toolBlocks.has(ref)
-        ? ref
-        : state.itemIdToCallId.get(ref);
-      const tool = callId ? state.toolBlocks.get(callId) : undefined;
+      const callId = resolveAnthropicCallId(state, data);
+      if (!callId || typeof data?.delta !== "string") return [];
+
+      const pending = state.pendingToolBlocks.get(callId);
+      if (pending && !pending.started) {
+        pending.argsBuf += data.delta;
+        return [];
+      }
+
+      const tool = state.toolBlocks.get(callId);
       if (!tool || typeof data?.delta !== "string") return [];
       tool.argsBuf += data.delta;
       return [
@@ -997,7 +1195,25 @@ export function responsesSSEToAnthropic(
       ];
     }
 
+    case "response.output_item.done": {
+      const item = data?.item;
+      if (item?.type !== "function_call" || !item.call_id) return [];
+      const tool = state.pendingToolBlocks.get(item.call_id);
+      if (!tool || tool.started) return [];
+
+      const name = validToolName(item.name);
+      if (!name) return anthropicStreamToolNameError(state);
+
+      const args =
+        typeof item.arguments === "string" ? item.arguments : tool.argsBuf;
+      return startAnthropicToolBlock(state, tool, name, args);
+    }
+
     case "response.completed": {
+      if (state.terminalErrorSent) return [];
+      if ([...state.pendingToolBlocks.values()].some((tool) => !tool.started)) {
+        return anthropicStreamToolNameError(state);
+      }
       const r = data?.response;
       if (r?.usage) {
         state.inputTokens = r.usage.input_tokens || 0;
@@ -1020,6 +1236,7 @@ export function responsesSSEToAnthropic(
     }
 
     case "response.failed": {
+      if (state.terminalErrorSent) return [];
       const msg = data?.response?.error?.message || "Upstream error";
       const out = ensureMessageStart(state);
       out.push(...closeOpenBlocks(state));

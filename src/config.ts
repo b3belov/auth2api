@@ -57,7 +57,12 @@ export type AnthropicReasoningLevel =
   | "high"
   | "max";
 
-export type CodexReasoningLevel = "minimal" | "low" | "medium" | "high";
+export type CodexReasoningLevel =
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh";
 
 export interface ReasoningConfig {
   anthropic?: AnthropicReasoningLevel;
@@ -123,6 +128,7 @@ const CODEX_REASONING_LEVELS = new Set<CodexReasoningLevel>([
   "low",
   "medium",
   "high",
+  "xhigh",
 ]);
 
 function normalizeDebugMode(value: unknown): DebugMode {

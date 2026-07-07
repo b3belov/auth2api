@@ -188,6 +188,30 @@ test("isLoopbackRequest allows local callers and rejects remote callers", () => 
   );
 });
 
+test("isLoopbackRequest can trust Docker host loopback in Docker browser OAuth mode", () => {
+  const original = process.env.AUTH2API_DOCKER_BROWSER_OAUTH;
+  process.env.AUTH2API_DOCKER_BROWSER_OAUTH = "1";
+  try {
+    assert.equal(
+      isLoopbackRequest({
+        headers: { host: "127.0.0.1:8317" },
+        socket: { remoteAddress: "192.168.147.1" },
+      } as any),
+      true,
+    );
+    assert.equal(
+      isLoopbackRequest({
+        headers: { host: "example.com:8317" },
+        socket: { remoteAddress: "192.168.147.1" },
+      } as any),
+      false,
+    );
+  } finally {
+    if (original === undefined) delete process.env.AUTH2API_DOCKER_BROWSER_OAUTH;
+    else process.env.AUTH2API_DOCKER_BROWSER_OAUTH = original;
+  }
+});
+
 test("AccountManager timer starters are idempotent", (t) => {
   const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-browser-"));
   t.after(() => {

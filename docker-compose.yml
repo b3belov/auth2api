@@ -2,12 +2,15 @@ services:
   auth2api:
     build: .
     ports:
-      - "8317:8317"
+      - "127.0.0.1:8317:8317"
+      - "127.0.0.1:1455:1455"
+      - "127.0.0.1:54545:54545"
     volumes:
       - ./config.yaml:/config/config.yaml
       - auth-data:/root/.auth2api
     environment:
       - NODE_ENV=production
+      - AUTH2API_DOCKER_BROWSER_OAUTH=1
     restart: unless-stopped
 
 volumes:

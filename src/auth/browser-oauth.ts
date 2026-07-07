@@ -7,6 +7,7 @@ import { Provider } from "../providers/types";
 
 const LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
 const LOOPBACK_HOSTS = ["127.0.0.1", "::1"] as const;
+const DOCKER_CALLBACK_HOSTS = ["0.0.0.0"] as const;
 
 const inFlight = new Map<string, Promise<void>>();
 
@@ -43,8 +44,47 @@ export function isLoopbackAddress(address: string | undefined): boolean {
   );
 }
 
+function isDockerBrowserOAuthMode(): boolean {
+  return process.env.AUTH2API_DOCKER_BROWSER_OAUTH === "1";
+}
+
+function isPrivateIpv4Address(address: string | undefined): boolean {
+  if (!address) return false;
+  const normalized = address.toLowerCase().replace(/^::ffff:/, "");
+  const parts = normalized.split(".").map((part) => Number(part));
+  if (
+    parts.length !== 4 ||
+    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  ) {
+    return false;
+  }
+
+  return (
+    parts[0] === 10 ||
+    (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) ||
+    (parts[0] === 192 && parts[1] === 168)
+  );
+}
+
+function isLoopbackHostHeader(host: unknown): boolean {
+  const raw = Array.isArray(host) ? host[0] : host;
+  if (typeof raw !== "string" || !raw.trim()) return false;
+  try {
+    const parsed = new URL(`http://${raw}`);
+    const hostname = parsed.hostname.toLowerCase().replace(/^\[|\]$/g, "");
+    return hostname === "localhost" || isLoopbackAddress(hostname);
+  } catch {
+    return false;
+  }
+}
+
 export function isLoopbackRequest(req: Request): boolean {
-  return isLoopbackAddress(req.socket.remoteAddress);
+  if (isLoopbackAddress(req.socket.remoteAddress)) return true;
+  return (
+    isDockerBrowserOAuthMode() &&
+    isPrivateIpv4Address(req.socket.remoteAddress) &&
+    isLoopbackHostHeader(req.headers.host)
+  );
 }
 
 export interface BrowserOAuthHandlerOptions {
@@ -210,7 +250,10 @@ function startBrowserCallback(options: {
       rejectStarted(err);
     }
 
-    const servers = LOOPBACK_HOSTS.map((host) => {
+    const callbackHosts = isDockerBrowserOAuthMode()
+      ? DOCKER_CALLBACK_HOSTS
+      : LOOPBACK_HOSTS;
+    const servers = callbackHosts.map((host) => {
       const server = http.createServer(requestHandler);
 
       server.once("error", (err) => {

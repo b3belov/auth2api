@@ -217,6 +217,24 @@ export function createServer(
     res.json({ status: "ok" });
   });
 
+  app.get(
+    "/v1/claude-auth",
+    createBrowserOAuthHandler({
+      provider: registry.get("anthropic"),
+      displayName: "Claude",
+      onAccountAdded: () => startProviderRuntime("anthropic"),
+    }),
+  );
+
+  app.get(
+    "/v1/codex-auth",
+    createBrowserOAuthHandler({
+      provider: registry.get("codex"),
+      displayName: "Codex",
+      onAccountAdded: () => startProviderRuntime("codex"),
+    }),
+  );
+
   app.use("/admin", requireAdminApiKey);
   app.use(["/v1", "/codex", "/backend-api/codex"], requireClientApiKey);
 
