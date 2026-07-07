@@ -1,0 +1,206 @@
+# Review package: 34dc93c51844f2db2d13ee4fe00ae366358204a4..HEAD
+
+## Commits
+0ac282d fix(server): allow first-run auth startup
+
+## Files changed
+ .superpowers/sdd/task-4-report.md | 53 +++++++++++++++++++++++++++++++++++++++
+ src/index.ts                      | 30 +++++++++++++---------
+ 2 files changed, 71 insertions(+), 12 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/task-4-report.md b/.superpowers/sdd/task-4-report.md
+new file mode 100644
+index 0000000..9908aa0
+--- /dev/null
++++ b/.superpowers/sdd/task-4-report.md
+@@ -0,0 +1,53 @@
++# Task 4 Report: Allow First-Run Server Startup
++
++## Scope
++
++- Modified only `/Users/dmytro/.codex/worktrees/cd2a/auth2api/src/index.ts`, as requested.
++- Added this report at `/Users/dmytro/.codex/worktrees/cd2a/auth2api/.superpowers/sdd/task-4-report.md`.
++
++## Requirements Covered
++
++1. Export `startServer(args?)` returning `http.Server`
++   - Added `import http from "http";`.
++   - Changed `startServer` to:
++     - `export async function startServer(args = process.argv.slice(2)): Promise<http.Server>`
++   - Switched config parsing inside `startServer` to use injected `args`.
++
++2. Allow first-run startup with zero accounts
++   - Removed the zero-account `process.exit(1)` path.
++   - Replaced the message with:
++     - `No accounts found. Start a browser login at /v1/claude-auth or /v1/codex-auth, or run with --login.`
++   - Existing auto-refresh and stats startup logic remains unchanged for loaded accounts and enabled stats.
++
++3. Return the listening server
++   - Captured `app.listen(...)` into `const server`.
++   - Returned `server` after the `SIGINT` handler setup.
++
++4. Print new browser-auth startup routes
++   - Added startup route logs for:
++     - `GET  /v1/claude-auth`
++     - `GET  /v1/codex-auth`
++
++5. Keep CLI behavior compatible
++   - `main()` still handles `--login`, `--manual`, `--provider=...`, and cursor-specific flags exactly in the CLI path.
++   - Updated the non-login branch to call `await startServer(args)` so CLI argument handling remains consistent.
++
++6. Guard CLI execution on import
++   - Wrapped `main().catch(...)` in `if (require.main === module) { ... }`.
++   - This prevents process startup when `src/index.ts` is imported by Task 5 tests.
++
++## Verification
++
++- Ran `npm run build`
++- Result: passed (`tsc` exited successfully)
++
++## Self-Review
++
++- Kept the edit limited to `src/index.ts`.
++- Did not change login flow internals beyond passing parsed CLI args through to `startServer`.
++- Did not add tests because the task brief explicitly says startServer import tests come in Task 5 and only requires `npm run build` for Task 4.
++
++## Concerns
++
++- No functional concerns from this task scope.
++- Runtime validation of the new first-run browser-auth path is deferred to later task coverage; this task verified compile/build only per brief.
+diff --git a/src/index.ts b/src/index.ts
+index be49146..69d1638 100644
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -1,10 +1,11 @@
++import http from "http";
+ import crypto from "crypto";
+ import readline from "readline";
+ import { Config, loadConfig, resolveAuthDir } from "./config";
+ import { ProviderId } from "./auth/types";
+ import { generatePKCECodes } from "./auth/pkce";
+ import { waitForCallback } from "./auth/callback-server";
+ import { importCursorTokenFromLocalStorage } from "./auth/cursor/storage";
+ import { runCursorBrowserLogin } from "./auth/cursor/browser-oauth";
+ import { buildRegistry, ProviderRegistry } from "./providers/registry";
+ import { createServer } from "./server";
+@@ -135,83 +136,86 @@ async function doLogin(
+     state,
+     pkce,
+   );
+   if (!tokenData.provider) tokenData.provider = provider.id;
+   provider.manager.addAccount(tokenData);
+   console.log(`\nLogin successful! Account: ${tokenData.email}`);
+   console.log(`Token expires: ${tokenData.expiresAt}`);
+   await notifyServerReload(config);
+ }
+ 
+-async function startServer(): Promise<void> {
+-  const configPath = process.argv
+-    .find((a) => a.startsWith("--config="))
+-    ?.split("=")[1];
++export async function startServer(
++  args = process.argv.slice(2),
++): Promise<http.Server> {
++  const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
+   const config = loadConfig(configPath);
+   const authDir = resolveAuthDir(config["auth-dir"]);
+ 
+   const registry = buildRegistry(authDir);
+   for (const p of registry.all()) p.manager.load();
+ 
+   const totalAccounts = registry
+     .all()
+     .reduce((sum, p) => sum + p.manager.accountCount, 0);
+   if (totalAccounts === 0) {
+     console.log(
+-      "No accounts found. Run with --login (and optionally --provider=codex) to add an account first.",
++      "No accounts found. Start a browser login at /v1/claude-auth or /v1/codex-auth, or run with --login.",
+     );
+-    process.exit(1);
+   }
+ 
+   for (const p of registry.all()) {
+     if (p.manager.accountCount > 0) {
+       p.manager.startAutoRefresh();
+       p.manager.startStatsLogger();
+     }
+   }
+ 
+   let statsRecorder: StatsRecorder | undefined;
+   if (config.stats.enabled) {
+     statsRecorder = new StatsRecorder();
+     statsRecorder.start(authDir);
+   }
+ 
+   const app = createServer(config, registry, statsRecorder);
+   const host = config.host || "127.0.0.1";
+   const port = config.port;
+ 
+-  app.listen(port, host, () => {
++  const server = app.listen(port, host, () => {
+     console.log(`auth2api running on http://${host}:${port}`);
+     console.log(`Endpoints:`);
+     console.log(`  POST /v1/chat/completions`);
+     console.log(`  POST /v1/responses`);
+     console.log(`  POST /v1/messages`);
+     console.log(`  POST /v1/messages/count_tokens`);
+     console.log(`  GET  /v1/models`);
++    console.log(`  GET  /v1/claude-auth`);
++    console.log(`  GET  /v1/codex-auth`);
+     console.log(`  GET  /admin/accounts`);
+     if (statsRecorder) console.log(`  GET  /admin/stats`);
+     console.log(`  GET  /health`);
+   });
+ 
+   process.on("SIGINT", () => {
+     for (const p of registry.all()) {
+       p.manager.stopAutoRefresh();
+       p.manager.stopStatsLogger();
+     }
+     if (statsRecorder) {
+       // Best-effort flush — exit even if close hangs so SIGINT stays responsive.
+       statsRecorder.stop().finally(() => process.exit(0));
+       setTimeout(() => process.exit(0), 1000).unref();
+       return;
+     }
+     process.exit(0);
+   });
++
++  return server;
+ }
+ 
+ async function main(): Promise<void> {
+   const args = process.argv.slice(2);
+   const configPath = args.find((a) => a.startsWith("--config="))?.split("=")[1];
+   const config = loadConfig(configPath);
+   const authDir = resolveAuthDir(config["auth-dir"]);
+ 
+   if (args.includes("--login")) {
+     const manual = args.includes("--manual");
+@@ -224,18 +228,20 @@ async function main(): Promise<void> {
+     if (providerId === "cursor") {
+       if (cursorStorage || args.includes("--cursor-import-local")) {
+         await importCursorLogin(config, registry, cursorStorage);
+       } else {
+         await browserCursorLogin(config, registry);
+       }
+     } else {
+       await doLogin(config, registry, providerId, manual);
+     }
+   } else {
+-    await startServer();
++    await startServer(args);
+   }
+ }
+ 
+-main().catch((err) => {
+-  console.error("Fatal:", err.message);
+-  process.exit(1);
+-});
++if (require.main === module) {
++  main().catch((err) => {
++    console.error("Fatal:", err.message);
++    process.exit(1);
++  });
++}

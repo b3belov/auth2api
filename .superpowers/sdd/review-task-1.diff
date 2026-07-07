@@ -1,0 +1,97 @@
+# Review package: f2fe9f52d57609405cf955203d492fadb52d59d5..HEAD
+
+## Commits
+252cdee fix(accounts): make timer starters idempotent
+
+## Files changed
+ .superpowers/sdd/task-1-report.md | 27 +++++++++++++++++++++++++++
+ src/accounts/manager.ts           |  7 +++----
+ 2 files changed, 30 insertions(+), 4 deletions(-)
+
+## Diff
+diff --git a/.superpowers/sdd/task-1-report.md b/.superpowers/sdd/task-1-report.md
+new file mode 100644
+index 0000000..1bbe2b8
+--- /dev/null
++++ b/.superpowers/sdd/task-1-report.md
+@@ -0,0 +1,27 @@
++# Task 1 Report: Add Idempotent Account Timers
++
++## Summary
++
++- Updated `src/accounts/manager.ts` so `startAutoRefresh()` and `startStatsLogger()` return immediately when their timers already exist.
++- Matched the timer-start behavior to the task brief, including the `auto-refresh failed` log message for the refresh loop.
++
++## Implementation Notes
++
++- `startAutoRefresh()` now checks `this.refreshTimer` before creating a new interval.
++- `startStatsLogger()` now checks `this.statsTimer` before creating a new interval.
++- No other account manager behavior was changed.
++
++## Validation
++
++- Ran `npm run build`
++- Result: passed
++
++## Self-Review
++
++- Scope stayed limited to `src/accounts/manager.ts`.
++- No test files were touched, which matches the task brief for this step.
++- `git diff --check` reported no whitespace or patch formatting issues.
++
++## Concerns
++
++- None for this task. The follow-up test coverage is expected to land in the later browser OAuth task.
+diff --git a/src/accounts/manager.ts b/src/accounts/manager.ts
+index 95da10c..922df17 100644
+--- a/src/accounts/manager.ts
++++ b/src/accounts/manager.ts
+@@ -500,45 +500,44 @@ export class AccountManager {
+         totalReasoningOutputTokens: acct.totalReasoningOutputTokens,
+         expiresAt: acct.token.expiresAt,
+         refreshing: acct.refreshPromise !== null,
+         planType: acct.token.planType,
+       });
+     }
+     return snapshots;
+   }
+ 
+   startAutoRefresh(): void {
++    if (this.refreshTimer) return;
+     const timer = setInterval(
+       () =>
+         this.refreshAll().catch((err) =>
+-          console.error(
+-            `[${this.provider}] refresh cycle failed:`,
+-            err.message,
+-          ),
++          console.error(`[${this.provider}] auto-refresh failed:`, err.message),
+         ),
+       REFRESH_CHECK_INTERVAL_MS,
+     );
+     timer.unref();
+     this.refreshTimer = timer;
+     this.refreshAll().catch((err) =>
+       console.error(`[${this.provider}] initial refresh failed:`, err.message),
+     );
+   }
+ 
+   stopAutoRefresh(): void {
+     if (this.refreshTimer) {
+       clearInterval(this.refreshTimer);
+       this.refreshTimer = null;
+     }
+   }
+ 
+   startStatsLogger(): void {
++    if (this.statsTimer) return;
+     const timer = setInterval(() => this.logStats(), 5 * 60 * 1000);
+     timer.unref();
+     this.statsTimer = timer;
+   }
+ 
+   stopStatsLogger(): void {
+     if (this.statsTimer) {
+       clearInterval(this.statsTimer);
+       this.statsTimer = null;
+     }

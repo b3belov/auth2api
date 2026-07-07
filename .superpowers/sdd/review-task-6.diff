@@ -1,0 +1,72 @@
+# Review package: ddc98583e595971865cf6f1bf4060789a86b111f..4016f81025c535c5d1a9aa57830ede063faa1262
+
+## Commits
+4016f81 docs: document browser OAuth login URLs
+
+## Files changed
+ README.md | 16 ++++++++++++++++
+ 1 file changed, 16 insertions(+)
+
+## Diff
+diff --git a/README.md b/README.md
+index 26423ea..fd8dbd0 100644
+--- a/README.md
++++ b/README.md
+@@ -42,20 +42,34 @@ npm run build
+ ## Login
+ 
+ auth2api supports these upstream providers:
+ 
+ - `anthropic` — Claude OAuth (default). Used for `claude-*` models.
+ - `codex` — OpenAI's "Sign in with ChatGPT" OAuth, talking to the official codex backend at `https://chatgpt.com/backend-api/codex/responses`. Used for `gpt-5*` (incl. `gpt-5-codex`), `o\d*`, and `codex-*` models. Requires a **ChatGPT Plus or Pro** subscription — Free accounts authenticate but the first call fails with `model not supported`.
+ - `cursor` — experimental Cursor account, authorized either through a browser deep-link PKCE flow (default) or by importing the local Cursor desktop login. **Routing**: in multi-provider setups Cursor only serves models with an explicit `cursor-*` or `cr/*` prefix. In **Cursor-exclusive mode** (only Cursor is logged in, no `anthropic`/`codex` accounts), every request — including bare `claude-*` or `gpt-*` model names — is auto-routed through Cursor so off-the-shelf Claude Code / OpenAI clients work without a prefix.
+ 
+ Pick the provider with `--provider=`. Default is `anthropic`.
+ 
++### Browser mode from the running server
++
++When the server is running locally, you can start OAuth from a normal browser page:
++
++```bash
++# Claude
++open http://127.0.0.1:8317/v1/claude-auth
++
++# Codex / ChatGPT
++open http://127.0.0.1:8317/v1/codex-auth
++```
++
++These routes are localhost-only and do not require an API key because they start an interactive browser login. Successful login writes the same token files as the CLI flow (`claude-<email>.json` or `codex-<email>.json`) and updates the running server immediately.
++
+ ### Auto mode (requires local browser)
+ 
+ ```bash
+ # Claude (default)
+ node dist/index.js --login
+ 
+ # Codex (ChatGPT Plus/Pro)
+ node dist/index.js --login --provider=codex
+ 
+ # Cursor (experimental; opens a browser to authorize your Cursor account)
+@@ -241,20 +255,22 @@ The decoder routes Cursor's chain-of-thought (`reasoning`) bytes to `response.re
+ | Endpoint                         | Description                                                           |
+ | -------------------------------- | --------------------------------------------------------------------- |
+ | `POST /v1/chat/completions`      | OpenAI-compatible chat                                                |
+ | `POST /v1/responses`             | OpenAI Responses API compatibility                                    |
+ | `POST /v1/messages`              | Claude native passthrough                                             |
+ | `POST /v1/messages/count_tokens` | Claude token counting                                                 |
+ | `GET /v1/models`                 | List available models                                                 |
+ | `GET /admin/accounts`            | Account health/status (API key required)                              |
+ | `GET /admin/stats`               | Per-client / per-account / per-API call statistics (API key required) |
+ | `POST /admin/reload`             | Reload tokens from disk (API key required)                            |
++| `GET /v1/claude-auth`            | Start Claude OAuth login from a local browser                         |
++| `GET /v1/codex-auth`             | Start Codex OAuth login from a local browser                          |
+ | `GET /health`                    | Health check                                                          |
+ 
+ ## Docker
+ 
+ ```bash
+ # Build
+ docker build -t auth2api .
+ 
+ # Run (mount your config and token directory)
+ docker run -d \

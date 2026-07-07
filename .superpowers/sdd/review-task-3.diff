@@ -1,0 +1,190 @@
+# Review package: 95de88c13c4801902ea8392d5b412750c0fc05aa..HEAD
+
+## Commits
+34dc93c feat(server): register browser auth routes
+
+## Files changed
+ .superpowers/sdd/task-3-report.md | 79 +++++++++++++++++++++++++++++++++++++++
+ src/server.ts                     | 27 +++++++++++++
+ 2 files changed, 106 insertions(+)
+
+## Diff
+diff --git a/.superpowers/sdd/task-3-report.md b/.superpowers/sdd/task-3-report.md
+new file mode 100644
+index 0000000..e104382
+--- /dev/null
++++ b/.superpowers/sdd/task-3-report.md
+@@ -0,0 +1,79 @@
++# Task 3 Report: Register the Browser Auth Routes
++
++## Scope
++
++- Modified `src/server.ts` only for production code, per task brief.
++- Added this report file under `.superpowers/sdd/`.
++
++## What changed
++
++1. Imported `createBrowserOAuthHandler` from `src/auth/browser-oauth.ts`.
++2. Added a local `startProviderRuntime()` helper inside `createServer()` to start refresh/stats runtime for `anthropic` and `codex` providers once an account exists.
++3. Registered exactly these browser-auth routes before the `/v1` API-key middleware:
++   - `GET /v1/claude-auth` -> provider id `anthropic`, display name `Claude`
++   - `GET /v1/codex-auth` -> provider id `codex`, display name `Codex`
++4. Did not add `/v1/anthropic-auth`.
++
++## Route ordering
++
++The two public browser-auth endpoints were inserted immediately before:
++
++```ts
++app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
++```
++
++That keeps them reachable without API-key auth while leaving the rest of `/v1` protected.
++
++## Loopback / browser behavior
++
++`src/auth/browser-oauth.ts` already enforces loopback-only access via `isLoopbackRequest()` and returns browser-friendly HTML responses for success/failure. No extra server-side route aliasing or special response handling was added in `src/server.ts`.
++
++## Verification
++
++### 1. Forbidden alias check
++
++Command:
++
++```bash
++rg -n "anthropic-auth" src tests README.md
++```
++
++Result:
++
++- No matches in tracked implementation/docs/tests.
++- Exit code `1`, which is expected for "no matches".
++
++### 2. Build
++
++Command:
++
++```bash
++npm run build
++```
++
++Result:
++
++- Passed (`tsc` completed successfully).
++
++### 3. Diff hygiene
++
++Command:
++
++```bash
++git diff --check
++```
++
++Result:
++
++- No whitespace or patch formatting issues.
++
++## Self-review
++
++- Confirmed the change is scoped to `src/server.ts` and does not touch unrelated code.
++- Confirmed the new public routes are registered before API-key middleware.
++- Confirmed only `/v1/claude-auth` and `/v1/codex-auth` were added.
++- Confirmed no `/v1/anthropic-auth` alias was introduced.
++
++## Notes
++
++- I did not add tests in this task because the brief scoped implementation to `src/server.ts` and required verification was `npm run build` plus the `rg` route check.
+diff --git a/src/server.ts b/src/server.ts
+index 8ab8bb4..3e1f61a 100644
+--- a/src/server.ts
++++ b/src/server.ts
+@@ -5,20 +5,21 @@ import { extractApiKey, hashApiKey } from "./utils/common";
+ import {
+   createChatCompletionsHandler,
+   createResponsesCompactHandler,
+   createResponsesHandler,
+ } from "./handlers/openai";
+ import {
+   createMessagesHandler,
+   createCountTokensHandler,
+ } from "./handlers/anthropic";
+ import { StatsRecorder } from "./stats/recorder";
++import { createBrowserOAuthHandler } from "./auth/browser-oauth";
+ 
+ // Simple in-memory rate limiter per IP
+ const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
+ const RATE_LIMIT_WINDOW_MS = 60 * 1000;
+ const RATE_LIMIT_MAX = 60;
+ 
+ function rateLimit(ip: string): boolean {
+   const now = Date.now();
+   const entry = rateLimitMap.get(ip);
+   if (!entry || now > entry.resetAt) {
+@@ -180,20 +181,28 @@ export function createServer(
+         recordStats({
+           status: "failure",
+           statusCode: 499,
+           failureKind: "client_disconnect",
+         });
+       }
+     });
+     next();
+   };
+ 
++  const startProviderRuntime = (providerId: "anthropic" | "codex") => {
++    const provider = registry.get(providerId);
++    if (provider.manager.accountCount > 0) {
++      provider.manager.startAutoRefresh();
++      provider.manager.startStatsLogger();
++    }
++  };
++
+   // Health check (no account count to avoid info leak)
+   app.get("/health", (_req, res) => {
+     res.json({ status: "ok" });
+   });
+ 
+   app.use("/admin", requireApiKey);
+   app.use("/admin", statsFinishMiddleware);
+ 
+   // GET /admin/stats — three-axis aggregated call statistics.
+   //   byClient — keyed by sha256(api-key); show short hex prefix to operator
+@@ -240,20 +249,38 @@ export function createServer(
+       } catch (err: any) {
+         reloaded[p.id] = { error: err?.message || String(err) };
+       }
+     }
+     res.json({
+       reloaded,
+       generated_at: new Date().toISOString(),
+     });
+   });
+ 
++  app.get(
++    "/v1/claude-auth",
++    createBrowserOAuthHandler({
++      provider: registry.get("anthropic"),
++      displayName: "Claude",
++      onAccountAdded: () => startProviderRuntime("anthropic"),
++    }),
++  );
++
++  app.get(
++    "/v1/codex-auth",
++    createBrowserOAuthHandler({
++      provider: registry.get("codex"),
++      displayName: "Codex",
++      onAccountAdded: () => startProviderRuntime("codex"),
++    }),
++  );
++
+   app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
+   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
+   app.get("/v1/models", async (_req, res) => {
+     const created = Math.floor(Date.now() / 1000);
+     const providers = registry.withAccounts();
+     const lists = await Promise.all(providers.map((p) => p.listModels()));
+     const data = lists.flatMap((models) =>
+       models.map((m) => ({
+         id: m.id,
+         object: "model",
