@@ -214,7 +214,11 @@ async function requestRaw(options: {
   path: string;
   headers?: Record<string, string>;
   body?: string;
-}): Promise<{ status: number; body: string; headers: http.IncomingHttpHeaders }> {
+}): Promise<{
+  status: number;
+  body: string;
+  headers: http.IncomingHttpHeaders;
+}> {
   const address = serverAddress(options.server);
 
   return new Promise((resolve, reject) => {
@@ -2037,6 +2041,74 @@ test("codex /v1/chat/completions translates Chat → Responses upstream and SSE 
   assert.equal(jsonResp.body.object, "chat.completion");
   assert.equal(jsonResp.body.choices[0].message.content, "foo bar");
   assert.equal(jsonResp.body.choices[0].finish_reason, "stop");
+});
+
+test("codex /v1/chat/completions repairs poisoned empty tool-call names", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  saveToken(
+    authDir,
+    makeToken({
+      accessToken: "codex-access",
+      email: "codex-poisoned-chat@example.com",
+      accountUuid: "chatgpt-account-id",
+      provider: "codex",
+    }),
+  );
+
+  let receivedUpstreamBody: any = null;
+  const restoreFetch = withMockedFetch(async (input, init) => {
+    assert.equal(
+      String(input),
+      "https://chatgpt.com/backend-api/codex/responses",
+    );
+    receivedUpstreamBody = JSON.parse(String(init?.body || "{}"));
+    return new Response(codexResponsesSseBody(["recovered"]), {
+      status: 200,
+      headers: { "Content-Type": "text/event-stream" },
+    });
+  });
+  const server = await startAppWithLoadedRegistry(makeConfig(authDir));
+  t.after(async () => {
+    restoreFetch();
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "POST",
+    path: "/v1/chat/completions",
+    headers: { Authorization: "Bearer test-key" },
+    body: {
+      model: "gpt-5.5",
+      messages: [
+        { role: "user", content: "weather?" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "", arguments: '{"city":"Kyiv"}' },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_1", content: "sunny" },
+        { role: "user", content: "continue" },
+      ],
+      stream: false,
+    },
+  });
+
+  assert.equal(resp.status, 200);
+  assert.equal(resp.body.choices[0].message.content, "recovered");
+  const recoveredCall = receivedUpstreamBody.input.find(
+    (item: any) => item.type === "function_call",
+  );
+  assert.equal(recoveredCall.call_id, "call_1");
+  assert.equal(recoveredCall.name, "recovered_tool_call");
+  assert.equal(recoveredCall.arguments, '{"city":"Kyiv"}');
 });
 
 test("codex /v1/messages translates Anthropic → Responses upstream and SSE → Anthropic back", async (t) => {

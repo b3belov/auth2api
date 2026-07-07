@@ -172,6 +172,37 @@ test("chatToResponsesRequest: rejects assistant tool_calls with missing function
   );
 });
 
+test("chatToResponsesRequest: can recover assistant tool_calls with missing names", () => {
+  const out = chatToResponsesRequest(
+    {
+      model: "gpt-5.5-medium",
+      messages: [
+        { role: "user", content: "weather?" },
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [
+            {
+              id: "call_1",
+              type: "function",
+              function: { name: "", arguments: '{"city":"Kyiv"}' },
+            },
+          ],
+        },
+        { role: "tool", tool_call_id: "call_1", content: "sunny" },
+      ],
+    },
+    { recoverInvalidToolCallNames: true },
+  );
+
+  assert.equal(out.input[1].type, "function_call");
+  assert.equal(out.input[1].call_id, "call_1");
+  assert.equal(out.input[1].name, "recovered_tool_call");
+  assert.equal(out.input[1].arguments, '{"city":"Kyiv"}');
+  assert.equal(out.input[2].type, "function_call_output");
+  assert.equal(out.input[2].call_id, "call_1");
+});
+
 test("chatToResponsesRequest: maps response_format json_schema and reasoning_effort", () => {
   const out = chatToResponsesRequest({
     model: "gpt-5.5-medium",

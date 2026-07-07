@@ -33,12 +33,28 @@ export class ResponsesTranslationError extends Error {
   }
 }
 
+const RECOVERED_TOOL_CALL_NAME = "recovered_tool_call";
+
+export interface ChatToResponsesOptions {
+  recoverInvalidToolCallNames?: boolean;
+}
+
 function requireNonEmptyName(value: unknown, path: string): string {
   if (typeof value === "string" && value.trim().length > 0) return value;
   throw new ResponsesTranslationError(
     `${path} must be a non-empty string`,
     "invalid_tool_call_name",
   );
+}
+
+function toolCallNameForResponses(
+  value: unknown,
+  path: string,
+  options: ChatToResponsesOptions,
+): string {
+  if (typeof value === "string" && value.trim().length > 0) return value;
+  if (options.recoverInvalidToolCallNames) return RECOVERED_TOOL_CALL_NAME;
+  return requireNonEmptyName(value, path);
 }
 
 /**
@@ -204,7 +220,10 @@ function extractText(content: unknown): string {
 // 1. OpenAI Chat Completions request → OpenAI Responses request
 // ─────────────────────────────────────────────────────────────────────
 
-export function chatToResponsesRequest(body: any): any {
+export function chatToResponsesRequest(
+  body: any,
+  options: ChatToResponsesOptions = {},
+): any {
   const out: any = {
     model: body.model,
     stream: !!body.stream,
@@ -294,9 +313,10 @@ export function chatToResponsesRequest(body: any): any {
         inputItems.push({
           type: "function_call",
           call_id: tc.id,
-          name: requireNonEmptyName(
+          name: toolCallNameForResponses(
             tc.function?.name,
             `messages[${messageIndex}].tool_calls[${toolCallIndex}].function.name`,
+            options,
           ),
           arguments: tc.function?.arguments || "{}",
         });

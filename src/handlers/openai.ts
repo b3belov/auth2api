@@ -123,7 +123,9 @@ async function proxyCodexChatCompletions(args: {
   const { req, resp, config, provider, body, model, stream } = args;
   let responsesBody: any;
   try {
-    responsesBody = normalizeCodexResponsesBody(chatToResponsesRequest(body));
+    responsesBody = normalizeCodexResponsesBody(
+      chatToResponsesRequest(body, { recoverInvalidToolCallNames: true }),
+    );
   } catch (err) {
     if (sendResponsesTranslationError(resp, err)) return;
     throw err;
