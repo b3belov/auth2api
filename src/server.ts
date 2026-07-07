@@ -12,6 +12,7 @@ import {
   createCountTokensHandler,
 } from "./handlers/anthropic";
 import { StatsRecorder } from "./stats/recorder";
+import { createBrowserOAuthHandler } from "./auth/browser-oauth";
 
 // Simple in-memory rate limiter per IP
 const rateLimitMap = new Map<string, { count: number; resetAt: number }>();
@@ -187,6 +188,14 @@ export function createServer(
     next();
   };
 
+  const startProviderRuntime = (providerId: "anthropic" | "codex") => {
+    const provider = registry.get(providerId);
+    if (provider.manager.accountCount > 0) {
+      provider.manager.startAutoRefresh();
+      provider.manager.startStatsLogger();
+    }
+  };
+
   // Health check (no account count to avoid info leak)
   app.get("/health", (_req, res) => {
     res.json({ status: "ok" });
@@ -246,6 +255,24 @@ export function createServer(
       generated_at: new Date().toISOString(),
     });
   });
+
+  app.get(
+    "/v1/claude-auth",
+    createBrowserOAuthHandler({
+      provider: registry.get("anthropic"),
+      displayName: "Claude",
+      onAccountAdded: () => startProviderRuntime("anthropic"),
+    }),
+  );
+
+  app.get(
+    "/v1/codex-auth",
+    createBrowserOAuthHandler({
+      provider: registry.get("codex"),
+      displayName: "Codex",
+      onAccountAdded: () => startProviderRuntime("codex"),
+    }),
+  );
 
   app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
