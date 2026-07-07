@@ -92,40 +92,58 @@ export function createServer(
     next();
   });
 
+  function requireConfiguredKey(
+    allowedKeys: Set<string>,
+    missingMessage: string,
+    invalidMessage: string,
+  ): express.RequestHandler {
+    return (req, res, next) => {
+      const key = extractApiKey(req.headers);
+      if (!key) {
+        res.status(401).json({ error: { message: missingMessage } });
+        return;
+      }
+      const valid = allowedKeys.has(key);
+      if (!valid) {
+        res.status(403).json({ error: { message: invalidMessage } });
+        return;
+      }
+      // Seed res.locals.stats so the stats-finish middleware can record this
+      // request even if the downstream handler aborts before filling in the
+      // upstream account / model / usage fields.
+      if (statsRecorder) {
+        const ip = req.ip || req.socket.remoteAddress || "unknown";
+        const ua = (req.headers["user-agent"] as string) || "";
+        res.locals.stats = {
+          apiKeyHash: hashApiKey(key),
+          ip,
+          ua,
+          endpoint: `${req.method} ${req.baseUrl}${req.path}`,
+          startedAt: Date.now(),
+          model: null,
+          provider: null,
+          accountEmail: null,
+          usage: null,
+          failureKind: null,
+        };
+      }
+      next();
+    };
+  }
+
   // API key auth middleware — accepts both OpenAI style (Authorization: Bearer)
   // and Anthropic style (x-api-key), so Claude Code and OpenAI clients both work
-  const requireApiKey: express.RequestHandler = (req, res, next) => {
-    const key = extractApiKey(req.headers);
-    if (!key) {
-      res.status(401).json({ error: { message: "Missing API key" } });
-      return;
-    }
-    const valid = config["api-keys"].has(key);
-    if (!valid) {
-      res.status(403).json({ error: { message: "Invalid API key" } });
-      return;
-    }
-    // Seed res.locals.stats so the stats-finish middleware can record this
-    // request even if the downstream handler aborts before filling in the
-    // upstream account / model / usage fields.
-    if (statsRecorder) {
-      const ip = req.ip || req.socket.remoteAddress || "unknown";
-      const ua = (req.headers["user-agent"] as string) || "";
-      res.locals.stats = {
-        apiKeyHash: hashApiKey(key),
-        ip,
-        ua,
-        endpoint: `${req.method} ${req.baseUrl}${req.path}`,
-        startedAt: Date.now(),
-        model: null,
-        provider: null,
-        accountEmail: null,
-        usage: null,
-        failureKind: null,
-      };
-    }
-    next();
-  };
+  const requireApiKey = requireConfiguredKey(
+    config["api-keys"],
+    "Missing API key",
+    "Invalid API key",
+  );
+
+  const requireAdminApiKey = requireConfiguredKey(
+    config["admin-api-keys"],
+    "Missing admin API key",
+    "Invalid admin API key",
+  );
 
   // Record one stats event per request that made it past auth. `finish`
   // covers normal responses; `close` covers client disconnects before the
@@ -192,7 +210,7 @@ export function createServer(
     res.json({ status: "ok" });
   });
 
-  app.use("/admin", requireApiKey);
+  app.use("/admin", requireAdminApiKey);
   app.use("/admin", statsFinishMiddleware);
 
   // GET /admin/stats — three-axis aggregated call statistics.

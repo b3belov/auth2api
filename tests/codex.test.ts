@@ -771,6 +771,7 @@ function makeCodexConfig(
     port: 0,
     "auth-dir": "/tmp",
     "api-keys": new Set(["k"]),
+    "admin-api-keys": new Set(["k"]),
     "body-limit": "1mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -1083,6 +1084,7 @@ function makeNotifyConfig(): Config2 {
     port: 18399,
     "auth-dir": "/tmp",
     "api-keys": new Set(["sk-test"]),
+    "admin-api-keys": new Set(["sk-test"]),
     "body-limit": "1mb",
     cloaking: { "cli-version": "2.1.88", entrypoint: "cli" },
     timeouts: {

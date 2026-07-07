@@ -1286,6 +1286,7 @@ test("createServer stats endpoint records mounted route prefix", async () => {
       port: 0,
       "auth-dir": tmp,
       "api-keys": new Set(["sk-test"]),
+      "admin-api-keys": new Set(["sk-test"]),
       "body-limit": "1mb",
       cloaking: {},
       timeouts: {
@@ -1326,6 +1327,7 @@ test("createServer stats records client disconnects on close", async () => {
       port: 0,
       "auth-dir": tmp,
       "api-keys": new Set(["sk-test"]),
+      "admin-api-keys": new Set(["sk-test"]),
       "body-limit": "1mb",
       cloaking: {},
       timeouts: {

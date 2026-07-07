@@ -23,6 +23,7 @@ function makeConfig(authDir: string): Config {
     port: 0,
     "auth-dir": authDir,
     "api-keys": new Set(["test-key"]),
+    "admin-api-keys": new Set(["test-key"]),
     "body-limit": "200mb",
     cloaking: {
       "cli-version": "2.1.88",
@@ -1065,6 +1066,59 @@ test("POST /admin/reload requires the API key", async (t) => {
     headers: { Authorization: "Bearer wrong" },
   });
   assert.equal(wrongAuth.status, 403);
+});
+
+test("POST /admin/reload accepts admin-api-keys for admin auth", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    {
+      ...makeConfig(authDir),
+      "api-keys": new Set(["client-key"]),
+      "admin-api-keys": new Set(["admin-key"]),
+    },
+    manager,
+  );
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const reloadResp = await requestJson({
+    server,
+    method: "POST",
+    path: "/admin/reload",
+    headers: { Authorization: "Bearer admin-key" },
+  });
+
+  assert.equal(reloadResp.status, 200);
+  assert.ok(reloadResp.body.reloaded);
+});
+
+test("admin routes reject client-only keys when admin-api-keys are distinct", async (t) => {
+  const authDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-smoke-"));
+  const manager = makeManager(authDir, [makeToken()]);
+  const server = await startApp(
+    {
+      ...makeConfig(authDir),
+      "api-keys": new Set(["client-key"]),
+      "admin-api-keys": new Set(["admin-key"]),
+    },
+    manager,
+  );
+  t.after(async () => {
+    await stopApp(server);
+    fs.rmSync(authDir, { recursive: true, force: true });
+  });
+
+  const resp = await requestJson({
+    server,
+    method: "GET",
+    path: "/admin/accounts",
+    headers: { Authorization: "Bearer client-key" },
+  });
+
+  assert.equal(resp.status, 403);
 });
 
 test("count_tokens with empty body returns upstream client error, not network error", async (t) => {
