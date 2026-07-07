@@ -1099,6 +1099,7 @@ test("POST /admin/reload requires the API key", async (t) => {
     path: "/admin/reload",
   });
   assert.equal(noAuth.status, 401);
+  assert.equal(noAuth.body.error.message, "Missing admin API key");
   const wrongAuth = await requestJson({
     server,
     method: "POST",

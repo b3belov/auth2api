@@ -98,7 +98,12 @@ export function createServer(
     return (req, res, next) => {
       const key = extractApiKey(req.headers);
       if (!key) {
-        res.status(401).json({ error: { message: "Missing API key" } });
+        res.status(401).json({
+          error: {
+            message:
+              label === "admin" ? "Missing admin API key" : "Missing API key",
+          },
+        });
         return;
       }
       if (!hasTimingSafeApiKey(key, allowedKeys)) {
