@@ -1249,7 +1249,7 @@ function captureLogs(): {
   };
 }
 
-test("notifyServerReload posts to /admin/reload with the first api-key as Bearer", async () => {
+test("notifyServerReload falls back to the first client api-key as Bearer", async () => {
   let seen: { url: string; init?: RequestInit } | null = null;
   const restoreFetch = withFetchStub(async (input, init) => {
     seen = { url: String(input), init };
@@ -1331,7 +1331,7 @@ test("notifyServerReload silently info-logs on ECONNREFUSED (server not running)
   assert.ok(cap.logs.some((l) => l.includes("no auth2api server detected")));
 });
 
-test("notifyServerReload warns on 401 (api-key mismatch)", async () => {
+test("notifyServerReload warns on 401 (admin-api-key mismatch)", async () => {
   const restoreFetch = withFetchStub(async () => {
     return new Response("unauthorized", { status: 401 });
   });
@@ -1347,7 +1347,7 @@ test("notifyServerReload warns on 401 (api-key mismatch)", async () => {
     cap.warns.some(
       (w) =>
         w.includes("rejected the reload (HTTP 401)") &&
-        w.includes("api-keys in config.yaml may differ"),
+        w.includes("admin-api-keys in config.yaml may differ"),
     ),
   );
 });

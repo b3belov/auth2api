@@ -71,8 +71,8 @@ export async function notifyServerReload(config: Config): Promise<void> {
   if (resp.status === 401 || resp.status === 403) {
     console.warn(
       `auth2api server is running but rejected the reload (HTTP ${resp.status}). ` +
-        `The api-keys in config.yaml may differ from the running server's; ` +
-        `restart the server to pick up the new token.`,
+        `The admin-api-keys in config.yaml may differ from the running server's; ` +
+        `restart the server to pick up the new key set.`,
     );
     return;
   }
