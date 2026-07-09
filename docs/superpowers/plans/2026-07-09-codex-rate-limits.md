@@ -4,7 +4,7 @@
 
 **Goal:** Forward safe Codex/OpenAI rate-limit headers from Codex upstream responses to auth2api clients.
 
-**Architecture:** Add one shared HTTP helper that copies a case-insensitive allowlist from Fetch `Response.headers` to an Express response. Use it from `proxyWithRetry` for terminal upstream errors and from every Codex success path before body bytes are written.
+**Architecture:** Add one shared HTTP helper that copies a case-insensitive allowlist from Fetch `Response.headers` to an Express response. Use it from `proxyWithRetry` only for Codex terminal upstream errors and from every Codex success path before body bytes are written.
 
 **Tech Stack:** TypeScript, Express, Node `fetch`/`Response`, `node:test`, existing `tsx --test` runner.
 
@@ -26,7 +26,7 @@
 
 ## File Structure
 
-- `src/utils/http.ts`: add and export `forwardRateLimitHeaders(upstream: Response, resp: ExpressResponse): void`; call it for the terminal upstream error response after retry selection has finished.
+- `src/utils/http.ts`: add and export `forwardRateLimitHeaders(upstream: Response, resp: ExpressResponse): void`; call it for the terminal upstream error response after retry selection has finished, guarded by `manager.provider === "codex"`.
 - `src/handlers/openai.ts`: import `forwardRateLimitHeaders`; call it in Codex chat, responses, and compact success paths before streaming, draining, setting content type, or sending JSON.
 - `src/handlers/anthropic.ts`: import `forwardRateLimitHeaders`; call it in the Codex messages success path before streaming, draining, or sending JSON.
 - `tests/unit.test.ts`: add focused helper and `proxyWithRetry` tests for allowlist behavior, case-insensitive matching, header exclusion, and terminal 429/error forwarding.
@@ -209,6 +209,40 @@ test("proxyWithRetry forwards allowlisted rate-limit headers on terminal errors"
   assert.equal(resp.headers["openai-organization"], undefined);
   assert.deepEqual(resp.body, { error: { message: "too many requests" } });
 });
+
+test("proxyWithRetry preserves Retry-After but does not forward quota headers for non-Codex terminal errors", async () => {
+  const resp = makeMockResponse();
+  const account: any = { token: { email: "x@y.z" } };
+  const manager: any = {
+    provider: "anthropic",
+    accountCount: 1,
+    getNextAccount: () => ({ account }),
+    recordAttempt: () => {},
+    recordFailure: () => {},
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestProxy", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 1,
+    upstream: async () =>
+      new Response(JSON.stringify({ error: { message: "too many requests" } }), {
+        status: 429,
+        headers: {
+          "retry-after": "5",
+          "x-ratelimit-remaining-requests": "0",
+          "x-ratelimit-reset-requests": "12s",
+        },
+      }),
+    success: async () => {},
+  });
+
+  assert.equal(resp.statusCode, 429);
+  assert.equal(resp.headers["retry-after"], "5");
+  assert.equal(resp.headers["x-ratelimit-remaining-requests"], undefined);
+  assert.equal(resp.headers["x-ratelimit-reset-requests"], undefined);
+  assert.deepEqual(resp.body, { error: { message: "too many requests" } });
+});
 ```
 
 - [ ] **Step 2: Run the failing test**
@@ -216,10 +250,10 @@ test("proxyWithRetry forwards allowlisted rate-limit headers on terminal errors"
 Run:
 
 ```bash
-npm test -- --test-name-pattern "proxyWithRetry forwards allowlisted rate-limit headers"
+npm test -- --test-name-pattern "proxyWithRetry forwards allowlisted rate-limit headers|proxyWithRetry preserves Retry-After but does not forward quota headers"
 ```
 
-Expected: FAIL because `x-ratelimit-remaining-requests` is not present on `resp.headers`.
+Expected: FAIL because `x-ratelimit-remaining-requests` is not present on `resp.headers` for the Codex test. The non-Codex test should already preserve `Retry-After`; after implementation it must also prove quota headers stay absent for non-Codex providers.
 
 - [ ] **Step 3: Store the last upstream response and forward headers before error JSON**
 
@@ -244,7 +278,7 @@ if (lastRetryAfter) resp.setHeader("Retry-After", lastRetryAfter);
 with:
 
 ```ts
-if (lastUpstream) {
+if (lastUpstream && manager.provider === "codex") {
   forwardRateLimitHeaders(lastUpstream, resp);
 } else if (lastRetryAfter) {
   resp.setHeader("Retry-After", lastRetryAfter);
@@ -258,10 +292,10 @@ Keep `lastRetryAfter` assigned where it is today so existing behavior remains av
 Run:
 
 ```bash
-npm test -- --test-name-pattern "proxyWithRetry forwards allowlisted rate-limit headers|proxyWithRetry does not write terminal error after client disconnects"
+npm test -- --test-name-pattern "proxyWithRetry forwards allowlisted rate-limit headers|proxyWithRetry preserves Retry-After but does not forward quota headers|proxyWithRetry does not write terminal error after client disconnects"
 ```
 
-Expected: PASS. The disconnect test must still report no writes after disconnect.
+Expected: PASS. The Codex terminal error test must forward the allowlisted quota headers, the non-Codex terminal error test must only preserve `Retry-After`, and the disconnect test must still report no writes after disconnect.
 
 - [ ] **Step 5: Commit**
 
@@ -286,7 +320,7 @@ Append these helpers and tests to `tests/codex.test.ts` after the existing Codex
 
 ```ts
 async function withCodexTestServer<T>(
-  upstream: typeof fetch,
+  upstream: (...args: Parameters<typeof fetch>) => Promise<Response>,
   run: (baseUrl: string) => Promise<T>,
 ): Promise<T> {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-rate-"));
@@ -304,7 +338,18 @@ async function withCodexTestServer<T>(
         "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" },
       }),
     });
-    globalThis.fetch = upstream;
+    let upstreamCalls = 0;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" || input instanceof URL
+          ? new URL(input.toString(), "http://localhost")
+          : new URL(input.url);
+      if (url.hostname === "chatgpt.com" || url.hostname === "api.openai.com") {
+        upstreamCalls++;
+        return upstream(input, init);
+      }
+      return origFetch(input, init);
+    };
     const registry = buildRegistry(tmpDir);
     for (const p of registry.all()) p.manager.load();
     const app = createServer(
@@ -332,7 +377,9 @@ async function withCodexTestServer<T>(
     try {
       const address = server.address();
       assert.ok(address && typeof address === "object");
-      return await run(`http://127.0.0.1:${address.port}`);
+      const result = await run(`http://127.0.0.1:${address.port}`);
+      assert.ok(upstreamCalls > 0, "test request should reach mocked Codex upstream");
+      return result;
     } finally {
       await new Promise<void>((resolve, reject) =>
         server.close((err) => (err ? reject(err) : resolve())),
@@ -373,7 +420,7 @@ test("Codex /v1/responses forwards safe rate-limit headers and drops unsafe head
       const response = await fetch(`${baseUrl}/v1/responses`, {
         method: "POST",
         headers: {
-          authorization: "Bearer sk-test",
+          "x-api-key": "sk-test",
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -408,7 +455,7 @@ test("Codex /v1/chat/completions streaming forwards rate-limit headers before bo
       const response = await fetch(`${baseUrl}/v1/chat/completions`, {
         method: "POST",
         headers: {
-          authorization: "Bearer sk-test",
+          "x-api-key": "sk-test",
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -449,7 +496,7 @@ test("Codex compact endpoints forward safe rate-limit headers", async () => {
       const response = await fetch(`${baseUrl}/v1/responses/compact`, {
         method: "POST",
         headers: {
-          authorization: "Bearer sk-test",
+          "x-api-key": "sk-test",
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -571,7 +618,7 @@ test("Codex /v1/messages forwards safe rate-limit headers", async () => {
       const response = await fetch(`${baseUrl}/v1/messages`, {
         method: "POST",
         headers: {
-          authorization: "Bearer sk-test",
+          "x-api-key": "sk-test",
           "content-type": "application/json",
         },
         body: JSON.stringify({
@@ -772,7 +819,7 @@ Forward safe Codex/OpenAI rate-limit headers from Codex upstream responses to au
 
 - Add an explicit allowlist for rate-limit response headers.
 - Forward allowlisted headers on Codex success paths for chat completions, Responses, Messages, and compact endpoints.
-- Forward allowlisted headers on terminal upstream errors such as 429 responses.
+- Forward allowlisted headers on Codex terminal upstream errors such as 429 responses while preserving existing `Retry-After` behavior for other providers.
 - Document the forwarded header names.
 
 ## Testing
