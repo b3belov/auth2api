@@ -10,6 +10,27 @@ import { Config, isDebugLevel } from "../config";
 
 export const MAX_RETRIES = 3;
 export const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+export const RATE_LIMIT_RESPONSE_HEADERS = [
+  "retry-after",
+  "x-ratelimit-limit-requests",
+  "x-ratelimit-limit-tokens",
+  "x-ratelimit-remaining-requests",
+  "x-ratelimit-remaining-tokens",
+  "x-ratelimit-reset-requests",
+  "x-ratelimit-reset-tokens",
+] as const;
+
+export function forwardRateLimitHeaders(
+  upstream: Response,
+  resp: ExpressResponse,
+): void {
+  for (const header of RATE_LIMIT_RESPONSE_HEADERS) {
+    const value = upstream.headers.get(header);
+    if (value !== null) {
+      resp.setHeader(header, value);
+    }
+  }
+}
 
 export function classifyFailure(status: number): AccountFailureKind {
   if (status === 429) return "rate_limit";

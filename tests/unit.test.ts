@@ -12,7 +12,12 @@ import {
   timeout,
 } from "../src/utils/common";
 import { combineAbortSignals } from "../src/utils/abort";
-import { classifyFailure, proxyWithRetry } from "../src/utils/http";
+import {
+  classifyFailure,
+  forwardRateLimitHeaders,
+  proxyWithRetry,
+  RATE_LIMIT_RESPONSE_HEADERS,
+} from "../src/utils/http";
 import { handleStreamingResponse } from "../src/upstream/streaming";
 import {
   resolveModel,
@@ -116,6 +121,52 @@ test("classifyFailure maps status codes correctly", () => {
   assert.equal(classifyFailure(502), "server");
   assert.equal(classifyFailure(503), "server");
   assert.equal(classifyFailure(418), "server");
+});
+
+test("RATE_LIMIT_RESPONSE_HEADERS contains only explicit safe header names", () => {
+  assert.deepEqual([...RATE_LIMIT_RESPONSE_HEADERS].sort(), [
+    "retry-after",
+    "x-ratelimit-limit-requests",
+    "x-ratelimit-limit-tokens",
+    "x-ratelimit-remaining-requests",
+    "x-ratelimit-remaining-tokens",
+    "x-ratelimit-reset-requests",
+    "x-ratelimit-reset-tokens",
+  ]);
+});
+
+test("forwardRateLimitHeaders copies allowlisted headers case-insensitively", () => {
+  const upstream = new Response("ok", {
+    headers: {
+      "X-RateLimit-Limit-Requests": "100",
+      "x-ratelimit-remaining-tokens": "9876",
+      "Retry-After": "3",
+      "set-cookie": "session=secret",
+      "cf-ray": "internal",
+      "openai-organization": "org_secret",
+    },
+  });
+  const resp = makeMockResponse();
+
+  forwardRateLimitHeaders(upstream, resp);
+
+  assert.equal(resp.headers["x-ratelimit-limit-requests"], "100");
+  assert.equal(resp.headers["x-ratelimit-remaining-tokens"], "9876");
+  assert.equal(resp.headers["retry-after"], "3");
+  assert.equal(resp.headers["set-cookie"], undefined);
+  assert.equal(resp.headers["cf-ray"], undefined);
+  assert.equal(resp.headers["openai-organization"], undefined);
+});
+
+test("forwardRateLimitHeaders skips missing allowlisted headers", () => {
+  const upstream = new Response("ok", {
+    headers: { "content-type": "application/json" },
+  });
+  const resp = makeMockResponse();
+
+  forwardRateLimitHeaders(upstream, resp);
+
+  assert.deepEqual(resp.headers, {});
 });
 
 function makeMockResponse(): any {
