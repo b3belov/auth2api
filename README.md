@@ -257,6 +257,22 @@ The ChatGPT codex backend rejects requests that don't include `stream: true`, `s
 
 Off-the-shelf OpenAI Responses / Chat / Claude Code clients all just work without knowing about codex's quirks.
 
+#### Codex rate-limit headers
+
+Codex-backed calls forward a narrow allowlist of upstream rate-limit headers so clients can inspect current ChatGPT-account quota directly from the response. This applies to successful responses from `/v1/chat/completions`, `/v1/responses`, `/v1/messages`, `/v1/responses/compact`, and to terminal Codex upstream errors:
+
+```text
+retry-after
+x-ratelimit-limit-requests
+x-ratelimit-limit-tokens
+x-ratelimit-remaining-requests
+x-ratelimit-remaining-tokens
+x-ratelimit-reset-requests
+x-ratelimit-reset-tokens
+```
+
+Other upstream headers are not forwarded. Non-Codex providers keep the existing `Retry-After` passthrough behavior on terminal errors only.
+
 #### Cursor `/v1/responses` limitations
 
 Cursor's chat protocol is reverse-engineered: requests go to `api2.cursor.sh/aiserver.v1.ChatService/StreamUnifiedChatWithTools` over HTTP/2 + `application/connect+proto`, and the response is decoded back into OpenAI Responses SSE deltas. Stream is forced on (Cursor only supports streaming). Tool calls, images, repository context, edit actions, and Cursor's richer agent protocol are intentionally not translated yet — only single-turn streaming text is supported.
