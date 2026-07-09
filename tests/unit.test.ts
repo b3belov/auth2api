@@ -401,6 +401,75 @@ test("proxyWithRetry does not write terminal error after client disconnects", as
   assert.equal(resp.body, undefined);
 });
 
+test("proxyWithRetry forwards allowlisted rate-limit headers on terminal errors", async () => {
+  const resp = makeMockResponse();
+  const account: any = { token: { email: "x@y.z" } };
+  const manager: any = {
+    provider: "codex",
+    accountCount: 1,
+    getNextAccount: () => ({ account }),
+    recordAttempt: () => {},
+    recordFailure: () => {},
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestProxy", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 1,
+    upstream: async () =>
+      new Response(JSON.stringify({ error: { message: "too many requests" } }), {
+        status: 429,
+        headers: {
+          "content-type": "application/json",
+          "x-ratelimit-remaining-requests": "0",
+          "x-ratelimit-reset-requests": "12s",
+          "openai-organization": "org_secret",
+        },
+      }),
+    success: async () => {},
+  });
+
+  assert.equal(resp.statusCode, 429);
+  assert.equal(resp.headers["x-ratelimit-remaining-requests"], "0");
+  assert.equal(resp.headers["x-ratelimit-reset-requests"], "12s");
+  assert.equal(resp.headers["openai-organization"], undefined);
+  assert.deepEqual(resp.body, { error: { message: "too many requests" } });
+});
+
+test("proxyWithRetry preserves Retry-After but does not forward quota headers for non-Codex terminal errors", async () => {
+  const resp = makeMockResponse();
+  const account: any = { token: { email: "x@y.z" } };
+  const manager: any = {
+    provider: "anthropic",
+    accountCount: 1,
+    getNextAccount: () => ({ account }),
+    recordAttempt: () => {},
+    recordFailure: () => {},
+    refreshAccount: async () => false,
+  };
+
+  await proxyWithRetry("TestProxy", resp, { debug: "off" } as any, {
+    manager,
+    maxRetries: 1,
+    upstream: async () =>
+      new Response(JSON.stringify({ error: { message: "too many requests" } }), {
+        status: 429,
+        headers: {
+          "retry-after": "5",
+          "x-ratelimit-remaining-requests": "0",
+          "x-ratelimit-reset-requests": "12s",
+        },
+      }),
+    success: async () => {},
+  });
+
+  assert.equal(resp.statusCode, 429);
+  assert.equal(resp.headers["retry-after"], "5");
+  assert.equal(resp.headers["x-ratelimit-remaining-requests"], undefined);
+  assert.equal(resp.headers["x-ratelimit-reset-requests"], undefined);
+  assert.deepEqual(resp.body, { error: { message: "too many requests" } });
+});
+
 test("proxyWithRetry tags stats failure kind for upstream server errors", async () => {
   const resp = makeMockResponse();
   resp.locals.stats = {};

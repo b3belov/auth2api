@@ -160,6 +160,7 @@ export async function proxyWithRetry(
   let lastStatus = 500;
   let lastErrBody = "";
   let lastRetryAfter: string | null = null;
+  let lastUpstream: Response | null = null;
   const refreshedAccounts = new Set<string>();
 
   const requestController = new AbortController();
@@ -191,6 +192,7 @@ export async function proxyWithRetry(
       let upstream: Response;
       try {
         upstream = await options.upstream(account, requestController.signal);
+        lastUpstream = upstream;
       } catch (err: any) {
         if (requestController.signal.aborted) return;
         tagStatsFailure(resp, "network", manager.provider);
@@ -316,8 +318,12 @@ export async function proxyWithRetry(
     return;
   }
 
-  // Forward upstream Retry-After verbatim — most useful on 429.
-  if (lastRetryAfter) resp.setHeader("Retry-After", lastRetryAfter);
+  if (lastUpstream && manager.provider === "codex") {
+    forwardRateLimitHeaders(lastUpstream, resp);
+  } else if (lastRetryAfter) {
+    // Preserve the legacy Retry-After passthrough for non-Codex providers.
+    resp.setHeader("Retry-After", lastRetryAfter);
+  }
 
   // Translate upstream error body if an adapter is provided. This prevents
   // provider-shaped errors (e.g. Anthropic JSON, Codex JSON) leaking into a
