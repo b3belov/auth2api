@@ -2,7 +2,7 @@ import { Request, Response as ExpressResponse } from "express";
 import { Config, isDebugLevel } from "../config";
 import { extractUsage } from "../accounts/manager";
 import { ProviderRegistry } from "../providers/registry";
-import { proxyWithRetry } from "../utils/http";
+import { forwardRateLimitHeaders, proxyWithRetry } from "../utils/http";
 import {
   applyAnthropicReasoningDefault,
   resolveModel,
@@ -126,6 +126,7 @@ async function proxyCodexMessages(args: {
         signal,
       }),
     success: async (upstream, account) => {
+      forwardRateLimitHeaders(upstream, resp);
       if (stream) {
         const state = makeResponsesToAnthropicState(model);
         const result = await handleStreamingResponse(upstream, resp, {

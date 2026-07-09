@@ -10,6 +10,27 @@ import { Config, isDebugLevel } from "../config";
 
 export const MAX_RETRIES = 3;
 export const RETRYABLE_STATUSES = new Set([429, 500, 502, 503, 504]);
+export const RATE_LIMIT_RESPONSE_HEADERS = [
+  "retry-after",
+  "x-ratelimit-limit-requests",
+  "x-ratelimit-limit-tokens",
+  "x-ratelimit-remaining-requests",
+  "x-ratelimit-remaining-tokens",
+  "x-ratelimit-reset-requests",
+  "x-ratelimit-reset-tokens",
+] as const;
+
+export function forwardRateLimitHeaders(
+  upstream: Response,
+  resp: ExpressResponse,
+): void {
+  for (const header of RATE_LIMIT_RESPONSE_HEADERS) {
+    const value = upstream.headers.get(header);
+    if (value !== null) {
+      resp.setHeader(header, value);
+    }
+  }
+}
 
 export function classifyFailure(status: number): AccountFailureKind {
   if (status === 429) return "rate_limit";
@@ -139,6 +160,7 @@ export async function proxyWithRetry(
   let lastStatus = 500;
   let lastErrBody = "";
   let lastRetryAfter: string | null = null;
+  let lastUpstream: Response | null = null;
   const refreshedAccounts = new Set<string>();
 
   const requestController = new AbortController();
@@ -170,6 +192,7 @@ export async function proxyWithRetry(
       let upstream: Response;
       try {
         upstream = await options.upstream(account, requestController.signal);
+        lastUpstream = upstream;
       } catch (err: any) {
         if (requestController.signal.aborted) return;
         tagStatsFailure(resp, "network", manager.provider);
@@ -295,8 +318,12 @@ export async function proxyWithRetry(
     return;
   }
 
-  // Forward upstream Retry-After verbatim — most useful on 429.
-  if (lastRetryAfter) resp.setHeader("Retry-After", lastRetryAfter);
+  if (lastUpstream && manager.provider === "codex") {
+    forwardRateLimitHeaders(lastUpstream, resp);
+  } else if (lastRetryAfter) {
+    // Preserve the legacy Retry-After passthrough for non-Codex providers.
+    resp.setHeader("Retry-After", lastRetryAfter);
+  }
 
   // Translate upstream error body if an adapter is provided. This prevents
   // provider-shaped errors (e.g. Anthropic JSON, Codex JSON) leaking into a

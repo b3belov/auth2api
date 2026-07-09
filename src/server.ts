@@ -299,7 +299,7 @@ export function createServer(
     }),
   );
 
-  app.use(["/v1", "/codex", "/backend-api/codex"], requireApiKey);
+  app.use(["/v1", "/codex", "/backend-api/codex"], requireClientApiKey);
   app.use(["/v1", "/codex", "/backend-api/codex"], statsFinishMiddleware);
   app.get("/v1/models", async (_req, res) => {
     const created = Math.floor(Date.now() / 1000);

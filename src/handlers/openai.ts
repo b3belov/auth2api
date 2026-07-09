@@ -2,7 +2,7 @@ import { Request, Response as ExpressResponse } from "express";
 import { Config, isDebugLevel } from "../config";
 import { extractUsage } from "../accounts/manager";
 import { ProviderRegistry } from "../providers/registry";
-import { proxyWithRetry } from "../utils/http";
+import { forwardRateLimitHeaders, proxyWithRetry } from "../utils/http";
 import { tagStatsModel, tagStatsUsage } from "../stats/recorder";
 import {
   resolveModel,
@@ -154,6 +154,7 @@ async function proxyCodexChatCompletions(args: {
         signal,
       }),
     success: async (upstream, account) => {
+      forwardRateLimitHeaders(upstream, resp);
       if (stream) {
         const state = makeResponsesToChatState(model);
         const result = await handleStreamingResponse(upstream, resp, {
@@ -292,6 +293,7 @@ async function proxyCodexResponses(args: {
         signal,
       }),
     success: async (upstream, account) => {
+      forwardRateLimitHeaders(upstream, resp);
       if (stream) {
         const result = await handleStreamingResponse(upstream, resp);
         if (result.completed) {
@@ -853,6 +855,7 @@ export function createResponsesCompactHandler(
             path: "/codex/responses/compact",
           }),
         success: async (upstream, account) => {
+          forwardRateLimitHeaders(upstream, resp);
           let usage: any = null;
           let streamUsage: any = null;
           const contentType = upstream.headers.get("content-type") || "";
