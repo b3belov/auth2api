@@ -1038,6 +1038,42 @@ test("Codex compact endpoints forward safe rate-limit headers", async () => {
   );
 });
 
+test("Codex /v1/messages forwards safe rate-limit headers", async () => {
+  await withCodexTestServer(
+    async () =>
+      new Response(codexCompletedSse(), {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "x-ratelimit-limit-tokens": "200000",
+          "x-ratelimit-reset-requests": "1s",
+        },
+      }),
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/v1/messages`, {
+        method: "POST",
+        headers: {
+          "x-api-key": "sk-test",
+          "content-type": "application/json",
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          stream: false,
+          max_tokens: 64,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("x-ratelimit-limit-tokens"), "200000");
+      assert.equal(response.headers.get("x-ratelimit-reset-requests"), "1s");
+      const body = await response.json();
+      assert.equal(body.type, "message");
+    },
+  );
+});
+
 // ══════════════════════════════════════════════════
 // AccountManager.reload — token-rotation race fix
 // ══════════════════════════════════════════════════
