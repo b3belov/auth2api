@@ -844,6 +844,200 @@ test("codex headers omit OpenAI-Beta unless configured, omit Account-ID if missi
   assert.equal(headers.Accept, "application/json");
 });
 
+async function withCodexTestServer<T>(
+  upstream: (...args: Parameters<typeof fetch>) => Promise<Response>,
+  run: (baseUrl: string) => Promise<T>,
+): Promise<T> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "auth2api-rate-"));
+  const origFetch = globalThis.fetch;
+  try {
+    saveToken(tmpDir, {
+      accessToken: "at",
+      refreshToken: "rt",
+      email: "codex@example.com",
+      expiresAt: "2030-01-01T00:00:00.000Z",
+      accountUuid: "acct_123",
+      provider: "codex",
+      idToken: makeJwt({
+        email: "codex@example.com",
+        "https://api.openai.com/auth": { chatgpt_account_id: "acct_123" },
+      }),
+    });
+    let upstreamCalls = 0;
+    globalThis.fetch = async (input, init) => {
+      const url =
+        typeof input === "string" || input instanceof URL
+          ? new URL(input.toString(), "http://localhost")
+          : new URL(input.url);
+      if (url.hostname === "chatgpt.com" || url.hostname === "api.openai.com") {
+        upstreamCalls++;
+        return upstream(input, init);
+      }
+      return origFetch(input, init);
+    };
+    const registry = buildRegistry(tmpDir);
+    for (const p of registry.all()) p.manager.load();
+    const app = createServer(
+      {
+        host: "127.0.0.1",
+        port: 0,
+        "auth-dir": tmpDir,
+        "api-keys": new Set(["sk-test"]),
+        "admin-api-keys": new Set(["sk-admin"]),
+        "body-limit": "1mb",
+        cloaking: { "cli-version": "2.1.88", entrypoint: "cli" },
+        timeouts: {
+          "messages-ms": 1000,
+          "stream-messages-ms": 1000,
+          "count-tokens-ms": 1000,
+        },
+        stats: { enabled: false },
+        reasoning: {},
+        debug: "off",
+      },
+      registry,
+    );
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    try {
+      const address = server.address();
+      assert.ok(address && typeof address === "object");
+      const result = await run(`http://127.0.0.1:${address.port}`);
+      assert.ok(upstreamCalls > 0, "test request should reach mocked Codex upstream");
+      return result;
+    } finally {
+      await new Promise<void>((resolve, reject) =>
+        server.close((err) => (err ? reject(err) : resolve())),
+      );
+    }
+  } finally {
+    globalThis.fetch = origFetch;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function codexCompletedSse(): string {
+  return [
+    "event: response.output_text.delta",
+    'data: {"delta":"ok"}',
+    "",
+    "event: response.completed",
+    'data: {"response":{"id":"resp_1","object":"response","created_at":1,"status":"completed","model":"gpt-5.5","output":[],"usage":{"input_tokens":4,"output_tokens":2,"input_tokens_details":{"cached_tokens":1},"output_tokens_details":{"reasoning_tokens":0}}}}',
+    "",
+    "",
+  ].join("\n");
+}
+
+test("Codex /v1/responses forwards safe rate-limit headers and drops unsafe headers", async () => {
+  await withCodexTestServer(
+    async () =>
+      new Response(codexCompletedSse(), {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "X-RateLimit-Limit-Requests": "100",
+          "x-ratelimit-remaining-requests": "99",
+          "openai-organization": "org_secret",
+          "set-cookie": "secret=1",
+        },
+      }),
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/v1/responses`, {
+        method: "POST",
+        headers: {
+          "x-api-key": "sk-test",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          stream: false,
+          input: [{ role: "user", content: "hi" }],
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("x-ratelimit-limit-requests"), "100");
+      assert.equal(response.headers.get("x-ratelimit-remaining-requests"), "99");
+      assert.equal(response.headers.get("openai-organization"), null);
+      assert.equal(response.headers.get("set-cookie"), null);
+      const body = await response.json();
+      assert.equal(body.status, "completed");
+    },
+  );
+});
+
+test("Codex /v1/chat/completions streaming forwards rate-limit headers before body", async () => {
+  await withCodexTestServer(
+    async () =>
+      new Response(codexCompletedSse(), {
+        status: 200,
+        headers: {
+          "content-type": "text/event-stream",
+          "x-ratelimit-remaining-tokens": "12345",
+        },
+      }),
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "x-api-key": "sk-test",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          stream: true,
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("x-ratelimit-remaining-tokens"), "12345");
+      const body = await response.text();
+      assert.match(body, /data:/);
+    },
+  );
+});
+
+test("Codex compact endpoints forward safe rate-limit headers", async () => {
+  await withCodexTestServer(
+    async () =>
+      new Response(
+        JSON.stringify({
+          id: "resp_1",
+          object: "response",
+          status: "completed",
+          output: [],
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        {
+          status: 200,
+          headers: {
+            "content-type": "application/json",
+            "x-ratelimit-reset-tokens": "2s",
+          },
+        },
+      ),
+    async (baseUrl) => {
+      const response = await fetch(`${baseUrl}/v1/responses/compact`, {
+        method: "POST",
+        headers: {
+          "x-api-key": "sk-test",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          model: "gpt-5.5",
+          input: [{ role: "user", content: "compact" }],
+        }),
+      });
+
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("x-ratelimit-reset-tokens"), "2s");
+      const body = await response.json();
+      assert.equal(body.status, "completed");
+    },
+  );
+});
+
 // ══════════════════════════════════════════════════
 // AccountManager.reload — token-rotation race fix
 // ══════════════════════════════════════════════════
